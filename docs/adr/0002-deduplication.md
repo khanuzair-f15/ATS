@@ -1,9 +1,10 @@
 # ADR 0002 — Deduplication strategy
 
 - **Status:** Proposed — thresholds are **provisional** and must be replaced by measured
-  values in S9 before this ADR is marked Accepted
+  values in S9 before this ADR is marked Accepted. Acceptance requires a holdout
+  precision lower bound ≥ 0.95 (§Evaluation protocol).
 - **Date:** 2026-11-13
-- **Affects:** S3 (schema support), S9 (engine + evaluation), S14 (coverage)
+- **Affects:** S1 (schema support), S9 (engine + evaluation), S14 (coverage)
 
 ## Context
 
@@ -62,16 +63,24 @@ A pair is compared only if it shares **at least one** key:
 | Key | Definition | Catches |
 |---|---|---|
 | `B1` | `(company_domain, title_stem)` | same employer, reworded title |
-| `B2` | `(company_key, city_key)` | same employer + city, different title phrasing |
-| `B3` | `(apply_host, external_id)` | literally the same req re-ingested |
+| `B2` | `(company_normalized, city_key)` | same employer + city, different title phrasing |
+| `B3` | `(apply_host, external_id)` | the same posting proxied through two sources |
 | `B4` | `(company_domain, apply_host)` | same req cross-posted to a board |
 
 `title_stem` = normalized title with department/track qualifiers kept and formatting
-removed. Keys with null components are skipped, not coalesced — a null city must not
-block every remote job together.
+removed. `company_domain`, `company_normalized`, `city_key` and `apply_host` are the
+actual columns in `docs/schema.md` §5 — no key references a column that does not exist.
+Keys with a NULL component are skipped, not coalesced: a null city must not block every
+remote job together.
 
-Expected candidate volume at 500k jobs: ~1–3% of all pairs, i.e. 2.5–7.5M comparisons,
-which is a batch job measured in minutes on one process pool.
+`B3` fires only **across** sources. Within one source, `(source_id, external_id)` is
+already a UNIQUE constraint, so two rows cannot exist — that pair is an upsert, not a
+dedup candidate. A blocking key that only ever matches rows that cannot coexist is
+vacuous and was removed.
+
+Expected candidate volume: comparisons are `Σ_k C(n_k, 2)` over blocking groups, not a
+fraction of all pairs. At the measured group sizes this is several orders of magnitude
+below `n²/2` at 500k jobs, and it is a batch job measured in minutes on one process pool.
 
 ### 3. Similarity features
 
@@ -90,13 +99,22 @@ A weighted score in `[0,1]` plus a per-feature evidence record stored on the pai
 
 Regardless of score:
 
-- Different `apply_host` **and** different `external_id` **and** different `city`
-  ⇒ **no merge** unless description Jaccard ≥ `HARD_DESC_SIM`.
-- Any two jobs whose `external_id` are both non-null and different **and** which come
-  from the same `source` ⇒ **no merge** (same board, different reqs).
-- Jobs with `remote_status = remote` and different `country_code` ⇒ no merge unless
-  description similarity is high (a "Senior Engineer (Remote)" posting can legitimately
-  be region-locked twice).
+- **Veto 1 — different req.** Different `apply_host` **and** different `external_id`
+  **and** different `city_key` ⇒ **no merge** unless description Jaccard ≥
+  `HARD_DESC_SIM = 0.80`.
+- **Veto 2 — same board, different reqs.** Two jobs with non-null, different
+  `external_id` values originating from the same `source` ⇒ **no merge**.
+- **Veto 3 — region-locked remote.** Both `remote_status = 'remote'` and
+  `country_code` both non-null and different ⇒ no merge unless description Jaccard
+  ≥ `HARD_DESC_SIM`.
+
+**NULL semantics (explicit).** A veto only applies when **every** component it
+compares is non-NULL. If any component is NULL the veto does not fire, and the pair is
+instead **capped at score 0.85** — below the auto-merge band — so it can be surfaced
+for review but can never be merged automatically. "Unknown city" must not be treated
+as "different city" (that silently blocks true duplicates) and must not be treated as
+"same city" (that silently merges distinct reqs). Capping is the only safe third
+option.
 
 ### 5. Thresholds
 
@@ -105,19 +123,32 @@ Provisional starting grid, to be replaced in S9 by a sweep on the labeled set:
 | Band | Score | Action |
 |---|---|---|
 | auto-merge | ≥ 0.88 | merge |
-| review | 0.72 – 0.88 | merge only if hard constraints pass **and** description sim ≥ 0.55; otherwise hold apart and log to `dedup_candidate_queue` |
+| review | 0.72 – 0.88 | **not merged automatically.** Logged to `dedup_candidate` with its feature evidence; merged only after an explicit human approval that records who approved it |
 | no-merge | < 0.72 | separate |
 
-The review band exists so the operator can see near-misses. It is not auto-merged.
+The review band is a queue, not a weaker merge rule. There is exactly one automatic
+merge path and it is the auto-merge band; anything else requires a human. Earlier
+wording said both "merge if hard constraints pass" and "not auto-merged", which was
+contradictory — the queue interpretation is the decision.
 
 ### 6. Clustering
 
-Union-find over accepted pairs within a blocking pass. Transitive closure is applied
-but **capped**: if a cluster would exceed `MAX_CLUSTER_SIZE` (default 6 occurrences),
-the weakest edge is dropped and the event logged. This prevents a single bad pair from
-fusing an entire department into one job.
+Union-find over accepted pairs, processed **in descending score order** (a
+maximum-spanning-forest construction):
 
-`job.dedup_cluster_id` points at the canonical cluster. `job_occurrence` rows are never
+1. Sort accepted pairs by score, highest first.
+2. For each pair `(u, v)`: find component roots (path compression). If equal, skip.
+3. If `size(root_u) + size(root_v) > MAX_CLUSTER_SIZE` (**default 6 occurrences**),
+   **reject the edge** and log it to `dedup_rejected_edge` with its score and reason.
+4. Otherwise union by size (smaller component into larger), recording the edge.
+
+This bounds every component at `MAX_CLUSTER_SIZE` by construction. A naive
+"merge, then check size, then split by dropping the weakest edge" does not terminate
+cleanly and can split the wrong edge; processing edges in weight order with a
+pre-union size check makes the cap exact and the result deterministic for a given
+`dedup_version`. The strongest evidence is always the evidence that survives the cap.
+
+`job.cluster_id` points at the canonical cluster. `job_occurrence` rows are never
 merged or deleted — the occurrence table is the audit trail and the source of
 "also seen on".
 
@@ -127,15 +158,26 @@ by earliest `first_seen_at`. The chosen record's `content_hash` drives change ev
 
 ## Evaluation protocol (S9, mandatory)
 
-- **~200 hand-labeled pairs**, drawn from real captured data after Wave A, not invented:
-  - ~100 true duplicates (cross-source same job, reworded titles, reposted-with-edits)
-  - ~100 hard negatives (same title/different city, same title/different team,
-    same company/different req id, same board/different posting)
-- Labels stored in `tests/dedup/labeled_pairs.jsonl` with the reason for each label.
-- Report: precision, recall, F1, the full threshold sweep, and a confusion breakdown
-  by feature (which features cause false merges).
-- Report **per-blocking-key** recall: if `B2` contributes nothing, drop it.
-- A named list of known failure modes with an example each.
+The gate is a **statistical** claim, not a point estimate. A precision of 19/20 is
+compatible with a true precision near 0.75; shipping that as "0.95" is exactly the
+overstatement this project forbids.
+
+- **≥400 labeled true-duplicate pairs** and **≥400 labeled hard negatives**, drawn from
+  real captured data after Wave E (S12), not invented:
+  - true duplicates: cross-source same job, reworded titles, reposted-with-edits
+  - hard negatives: same title/different city, same title/different team, same
+    company/different req id, same board/different posting, repost with a different req
+- Labels stored in `tests/dedup/labeled_pairs.jsonl` with the reason for each label and
+  how the pair was found.
+- **30% stratified holdout** by `(source, employer)` pair, held out from **all**
+  threshold tuning. The reported number is computed on the holdout only, once.
+- Gate: **Wilson 95% lower bound on precision ≥ 0.95** on the holdout. If the lower
+  bound is below 0.95, thresholds do not ship and this ADR stays `Proposed`.
+- Recall is reported with its own Wilson interval. It is reported honestly and is
+  **not** gated — precision-first is the policy.
+- Report the full threshold sweep on the tuning split, a confusion breakdown by
+  feature (which features cause false merges), per-blocking-key recall (drop a key that
+  contributes nothing), and a named failure mode with one example each.
 
 ## Consequences
 
@@ -148,6 +190,9 @@ platform mix changes; description shingling adds a batch job to the pipeline.
 
 ## Reversal cost
 
-Low. `dedup_cluster_id` is nullable; the engine is a batch job that can be re-run from
-scratch with a new `dedup_version`. Merges are not destructive because occurrences are
-never collapsed. Reverting means setting the column to null, not restoring data.
+Low. `job.cluster_id` is nullable and `is_canonical` defaults to `true`, so an
+unclustered database is the initial state. The engine is a batch job that can be
+re-run from scratch with a new `dedup_version`. Merges are not destructive because
+occurrences are never collapsed. Reverting means clearing `cluster_id` and resetting
+`is_canonical`/`merged_into_job_id` for the affected `dedup_version`, not restoring
+deleted data.

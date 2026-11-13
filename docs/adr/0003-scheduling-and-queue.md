@@ -47,25 +47,79 @@ source_run_queue
   available_at      timestamptz     -- scheduling + backoff
   claimed_at        timestamptz null
   claimed_by        text null       -- worker id
+  heartbeat_at      timestamptz null -- liveness of the claim; drives reclaim
   attempts          int not null default 0
   state             enum('pending','running','succeeded','failed','abandoned')
   unique (source_id, run_id)
-  index (state, available_at) where state = 'pending'
+  unique (source_id) where state in ('pending','running')   -- one live attempt
+  index (available_at) where state = 'pending'
 ```
 
-### Claim
+The partial unique index is the real scheduling invariant. `UNIQUE (source_id, run_id)`
+is vacuous on its own because `run_id` defaults to a fresh UUID on every insert.
+
+### Enqueue (one tick, one transaction)
+
+`source.next_due_at` is the scheduling authority; the queue holds only **live
+attempts**. Three statements, all idempotent, run in one transaction by the scheduler
+tick, **in this order**:
+
+```sql
+-- 1. an open breaker whose backoff has expired gets one probe
+UPDATE source SET health = 'half_open'
+WHERE enabled AND health = 'open' AND backoff_until <= now();
+
+-- 2. give every due source exactly one pending attempt
+INSERT INTO source_run_queue (source_id, available_at)
+SELECT s.id, now()
+FROM source s
+WHERE s.enabled
+  AND s.health <> 'open'
+  AND s.next_due_at <= now()
+  AND (s.backoff_until IS NULL OR s.backoff_until <= now())
+  AND NOT EXISTS (
+    SELECT 1 FROM source_run_queue q
+    WHERE q.source_id = s.id AND q.state IN ('pending','running')
+  );
+
+UPDATE source
+SET next_due_at = now() + CASE refresh_tier
+    WHEN 'hot'  THEN interval '6 hours'
+    WHEN 'warm' THEN interval '12 hours'
+    WHEN 'cool' THEN interval '24 hours'
+    ELSE interval '72 hours' END
+WHERE enabled AND health <> 'open' AND next_due_at <= now();
+```
+
+Running these out of order, or outside one transaction, produces either a duplicate
+attempt or a source that is never scheduled again. The partial unique index makes the
+insert safe under two concurrent scheduler ticks.
+
+The third statement deliberately excludes `health = 'open'`: an open source's
+`next_due_at` is left in the past so that when statement 1 promotes it to `half_open`,
+it is immediately due and the probe runs on the next tick rather than waiting up to 72
+hours for its tier interval to elapse.
+
+### Claim (joins `source`, so `open` sources are genuinely not claimed)
 
 ```sql
 UPDATE source_run_queue q
-SET state = 'running', claimed_at = now(), claimed_by = $1, attempts = attempts + 1
+SET state = 'running', claimed_at = now(), claimed_by = $1,
+    heartbeat_at = now(), attempts = q.attempts + 1
 WHERE q.id = (
-  SELECT id FROM source_run_queue
-  WHERE state = 'pending' AND available_at <= now()
-  ORDER BY available_at
-  FOR UPDATE SKIP LOCKED
+  SELECT q2.id
+  FROM source_run_queue q2
+  JOIN source s ON s.id = q2.source_id
+  WHERE q2.state = 'pending'
+    AND q2.available_at <= now()
+    AND s.enabled
+    AND s.health <> 'open'
+    AND (s.backoff_until IS NULL OR s.backoff_until <= now())
+  ORDER BY q2.available_at
+  FOR UPDATE OF q2 SKIP LOCKED
   LIMIT 1
 )
-RETURNING *;
+RETURNING q.*;
 ```
 
 ### Complete
@@ -74,14 +128,50 @@ In the **same transaction** as the data writes:
 
 1. upsert occurrences on `(source_id, external_id)`,
 2. insert `change_event` rows for detected field drift,
-3. insert exactly one `fetch_run` row,
-4. update `source` health (`last_success_at`, `consecutive_failures`, `backoff_until`),
+3. finalize the `fetch_run` row created at claim (`finished_at`, `outcome`, counts),
+4. update `source` health (`last_success_at`, `last_attempt_at`,
+   `consecutive_failures`, `backoff_until`) and scheduling:
+   - success/half-open success → `next_due_at = now() + tier interval`,
+     `backoff_until = NULL`
+   - qualifying failure → `backoff_until = now() + retry_delay(n)` and
+     `next_due_at = least(next_due_at, backoff_until)` so a degraded source retries
+     sooner than its tier interval rather than waiting 12–72 hours
 5. set queue row `succeeded` / `failed`.
 
-If the transaction rolls back, the queue row stays `running`. A reclaimer marks
-`running` rows older than `claim_timeout` as `pending` with `attempts` intact. This is
-what makes delivery at-least-once and writes idempotent: replaying a run re-upserts
-the same rows and produces the same end state.
+A long connector run updates `heartbeat_at` every 60s on its queue row. If the
+transaction rolls back, the queue row stays `running`; the reclaimer below is what
+makes delivery at-least-once and the writes idempotent.
+
+### Reclaim and the `abandoned` path
+
+`fetch_run` is **created at claim**, not at completion (`docs/schema.md` §7). A crash
+therefore leaves a visible `NULL`-outcome run instead of no row at all — invariant 3
+("no silent failures") otherwise has a hole exactly where it matters most.
+
+```sql
+WITH stale AS (
+  UPDATE source_run_queue
+  SET state = CASE WHEN attempts >= 3 THEN 'abandoned' ELSE 'pending' END,
+      claimed_by = NULL, claimed_at = NULL
+  WHERE state = 'running'
+    AND heartbeat_at < now() - interval '15 minutes'
+  RETURNING id, source_id, state
+)
+UPDATE fetch_run f
+SET outcome = 'abandoned', finished_at = now(),
+    error_class = 'transient', error_detail = 'worker heartbeat expired'
+FROM stale
+WHERE f.queue_id = stale.id AND f.outcome IS NULL;
+```
+
+- `abandoned` is **not** `failure`. A dead worker is not a fault of the source and must
+  not count against its success rate or trip its circuit breaker.
+- After 3 expired claims the queue row is marked `abandoned` and is not re-enqueued
+  automatically; the next scheduled attempt for that source is a fresh row. A source
+  that reliably kills workers must surface as an operator incident, not as an infinite
+  retry loop.
+- The reclaimer is idempotent: the final `UPDATE ... WHERE f.outcome IS NULL` matches
+  nothing on a second pass.
 
 ### Refresh tiers
 
@@ -100,21 +190,38 @@ converges on one moment.
 
 ### Failure handling and circuit breaker
 
-States: `healthy → degraded → open → half_open → healthy`.
+States: `healthy → degraded → open → half_open → healthy`, with `degraded → healthy`
+on recovery.
 
-- `degraded`: 1–2 consecutive failures. Still scheduled at tier interval.
-- `open`: 3+ consecutive failures, or a `blocked` error class. Scheduling stops;
-  `backoff_until = now() + min(base * 2^(n-3), max_backoff)` with jitter
-  (base 30m, max 24h).
-- `half_open`: one probe run after backoff. Success → `healthy`; failure → `open`
-  with a larger backoff.
+**Counter semantics (`source.consecutive_failures`).** The counter is driven by
+`fetch_run.outcome` + `fetch_run.error_class`, one row per attempt:
+
+| Run result | Counter | Health effect |
+|---|---|---|
+| `success` | reset to 0 | `degraded → healthy`, `half_open → healthy` |
+| `partial` | unchanged | no health change (evidence is incomplete, not absent) |
+| `failure`, `error_class ∈ {transient, rate_limited, parse}` | +1 | `healthy → degraded` at 1–2; `→ open` at 3 |
+| `failure`, `error_class = permanent` or source-root `not_found` | +1 **and** `→ open` immediately | a 404 on the board itself is not transient |
+| `failure`, `error_class = blocked` | +1 | first `blocked`: backoff, stay `degraded`; **second consecutive** `blocked`: `→ open` |
+| `abandoned` | unchanged | none — worker crash, not a source fault |
+
+Two `blocked` observations are required before `open` because a single WAF response is
+often a bad minute, and opening the breaker on it hides a healthy source for hours.
+`blocked` still backs off immediately after the first observation.
+
+- `degraded`: 1–2 consecutive qualifying failures. Still scheduled at tier interval.
+- `open`: scheduling stops; `backoff_until = now() + min(base * 2^(n-3), max_backoff)`
+  with jitter (base 30m, max 24h).
+- `half_open`: one probe run after backoff. Success → `healthy`, counter reset.
+  Failure → `open` with a larger backoff.
 - A source in `open` is **still visible** in `/v1/sources` and in the coverage report
   as degraded. It is never silently dropped.
 
 **Critical rule:** entering `open` never closes jobs. It only stops scheduling. Closure
-is governed by ADR-0002-era rules in S6 and requires positive evidence. A source that
-fails for a week leaves its jobs `open` with a rising `last_checked_at` age and an
-explicit `stale` signal in the API — which is honest, whereas closing them would be a lie.
+is governed by the S6 invariant suite and the closure predicate in `docs/schema.md`
+§11, and requires positive evidence. A source that fails for a week leaves its jobs
+`open` with a rising staleness age and an explicit `stale` signal in the API — which is
+honest, whereas closing them would be a lie.
 
 ## Consequences
 

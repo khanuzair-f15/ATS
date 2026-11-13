@@ -1,0 +1,13 @@
+# Documentation repo: keep LF in the object store so diffs are stable across platforms.
+* text=auto eol=lf
+
+*.md    text eol=lf
+*.py    text eol=lf
+*.toml  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sql   text eol=lf
+
+*.png   binary
+*.jpg   binary
+*.pdf   binary

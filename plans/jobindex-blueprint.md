@@ -47,27 +47,33 @@ conventional commit. No remote, no PR. The commit is the review artifact.
 ## 2. Dependency graph
 
 ```
-S0 ──► S1 ──► S2 ──► S3 ──► S4 ──► S5 ──► S6
-                                        │
-              ┌─────────────────────────┼──────────────────────────┐
-              ▼                         ▼                          ▼
-             S7                        S10                        S12
-              │                         │                          │
-              ├──► S8                   └──► S11                   │
-              │                                                     │
-              └──► S9 (dedup)                                       │
-                                        S11 ──┐                     │
-                                              ├──► S13 (headless residual)
-                                        S12 ──┘                     │
-                                              └──► S14 ◄─────────────┘
-                                                     │
-                                                     ▼
-                                                    S15
+                         S0 → S1 → S2 → S3 → S4 → S5 → S6
+                                                        │
+                    ┌───────────────────┬───────────────┴───────────────┐
+                    ▼                   ▼                               ▼
+                   S7                  S10                             S12
+                    │                   │                               │
+                    ▼                   ▼                               │
+                   S8                  S11                              │
+                    │                   │                               │
+                    └──────────┬────────┴───────────────┬───────────────┘
+                               ▼                        │
+                              S13                       │
+                               │                        │
+                               │      S7 ──┬──► S9 ◄───┘   (S9 needs S7 + S12)
+                               │           │
+                               └─────┬─────┴──────────────► S14
+                                     │                       │
+                                     ▼                       ▼
+                                    S15
 ```
 
-Parallel groups: `{S7, S10, S12}` after S6. `{S8, S9, S11}` each depend on their
-own parent only. S13 waits on both enterprise and board waves so it captures only
-genuine residuals, not work S10–S12 already did.
+Parallel groups: `{S7, S10, S12}` after S6. `S8` waits on `S7`; `S11` waits on
+`S10`; `S9` waits on `S7` **and** `S12` (dedup needs cross-source overlap, and the
+only reliable overlap comes from boards re-posting ATS jobs); `S13` waits on all four
+connector waves so it captures only genuine residuals; `S14` waits on `S9` **and**
+`S13` so the coverage report cannot be generated before the last connector wave
+finishes.
 
 ---
 
@@ -88,14 +94,20 @@ most expensive to change after 20 connectors. This step produces documents only.
   tiered refresh, circuit breaker.
 - `docs/adr/0004-search.md` — Postgres FTS + `pg_trgm`, ranking, cursor pagination,
   measured triggers for adding an external engine.
-- `docs/schema.md` — `source`, `job`, `job_occurrence`, `fetch_run`, `change_event`,
-  enums, indexes, invariants, closure state machine.
-- `docs/platforms.md` — all 78 classified by transport, verification status,
-  expected request volume, risk, and what is explicitly out of scope.
+- `docs/adr/0005-tenants-and-secrets.md` — how ~500k jobs is reached from 78 platforms
+  (tenant acquisition arithmetic), tenant lifecycle, and secret resolution.
+- `docs/schema.md` — `platform`, `source`, `job`, `job_cluster`, `job_occurrence`,
+  `fetch_run`, `change_event`, enums, indexes, invariants, closure state machine,
+  liveness enforcement, explicit S1 table set.
+- `docs/platforms.md` — all 78 classified by transport, **owned by exactly one wave**,
+  verification status, expected request volume, risk, and what is explicitly out of scope.
+- `plans/MUTATIONS.md` — the plan mutation log, opened with M-001 (review remediation).
 - This plan.
 
-**Verification:** `docs/platforms.md` row count = 78; every table in `docs/schema.md`
-has a stated primary key and owner; ADR 0001 states a decision, not a survey.
+**Verification:** `docs/platforms.md` row count = 78; every platform row has exactly one
+`Wave`, the wave counts sum to 78, and the class counts match the stated distribution;
+every table in `docs/schema.md` has a stated primary key and owner; ADR 0001 states a
+decision, not a survey.
 
 **Exit criteria:** stakeholder approves wave sequencing in §2.
 
@@ -115,7 +127,15 @@ unreviewable. `pytest` must be able to run the full suite with networking disabl
 - `pyproject.toml` (uv or pip, Python 3.12), `src/jobindex/` layout:
   `connectors/`, `normalize/`, `db/`, `api/`, `scheduler/`, `dedup/`, `web/`.
 - `docker-compose.yml`: Postgres 16 with `pg_trgm`, `unaccent`, `pgcrypto`.
-- SQLAlchemy 2.x async engine + Alembic baseline; migrations create the §schema tables.
+- SQLAlchemy 2.x async engine + Alembic baseline. **The baseline migration creates
+  exactly this set, no more:** enums `transport_class`, `platform_class`,
+  `refresh_tier`, `source_health`, `tenant_status`, `job_status`, `remote_status`,
+  `employment_type`, `salary_period`, `fetch_outcome`, `error_class`,
+  `verification_status`, `closure_evidence`; tables `platform`, `source`, `job`,
+  `job_cluster`, `job_occurrence`, `fetch_run`, `change_event`; every constraint,
+  generated column and index in `docs/schema.md` §2–§11 except the queue and dedup
+  tables. `platform` is seeded from `docs/platforms.md` in a data migration, and a
+  test asserts the table and the document agree row-for-row.
 - `settings.py` via `pydantic-settings`; `.env.example`; secrets never committed.
 - `GET /healthz` and `GET /readyz` (readiness checks DB round-trip).
 - `pytest` + `pytest-asyncio`; a `no_network` autouse fixture that fails any test
@@ -153,13 +173,20 @@ produce permanent offline tests.
 - `tools/replay.py`: fixture-backed transport that drops into `ConnectorContext`.
 - `connectors/_template/` — a runnable reference connector plus
   `docs/adding-a-connector.md` (the "add a platform in an afternoon" guide).
+- `jobindex.cli coverage` — **ships here, not in S14.** It reads `platform`,
+  `source`, `fetch_run` and regenerates `docs/platforms.md`'s `Verified` column and
+  `docs/coverage.md`. Generating evidence must exist before the first connector, or
+  `verified` is a human-edited claim (review C9). S14 extends this command with NFR
+  measurements; it does not introduce it.
 - Rate limiter: default 1 concurrent request per host, jittered delay, configurable
   per connector; identifiable UA with contact URL; `robots.txt` enforced for
   HTML-class connectors only.
 
 **Verification:** `python -m pytest tests/connectors/test_template.py -q`; template
 connector produces normalized output from its own fixture with networking blocked.
-**Exit criteria:** a new connector can be added by copying `_template/` and nothing else.
+**Exit criteria:** a new connector can be added by copying `_template/` and nothing
+else; `jobindex.cli coverage` reproduces `docs/platforms.md` byte-for-byte from the DB
+with every row still `no`.
 **Rollback:** revert branch; no data written.
 
 ---
@@ -177,8 +204,9 @@ wrong 78 times. One platform, one real tenant, all the way into Postgres, includ
 - Normalizer: HTML → sanitized markdown; location parsing (`city/region/country/raw`);
   remote-status inference with `unknown` as the honest default; employment-type enum
   mapping; salary parsing with raw string always preserved.
-- Upsert by `(source_id, external_id)`; content hash for change detection;
-  `change_event` rows on field drift.
+- Upsert `job` on `(origin_source_id, origin_external_id)` and `job_occurrence` on
+  `(source_id, external_id)`; content hash for change detection; `change_event` rows
+  on field drift.
 - Recorded fixtures for ≥2 distinct employers (proves the connector is not
   hardcoded to one tenant).
 
@@ -191,7 +219,11 @@ psql -c "select outcome, jobs_found from fetch_run"
 ```
 **Exit criteria:** ≥2 employers ingested; every record has title, company,
 description, location, source_url, apply_url; re-running is idempotent (no dupes).
-**Rollback:** delete the source row; occurrences cascade.
+**Rollback:** set `source.enabled = false` and leave the rows in place. Occurrences are
+never deleted (schema §14), and `job_occurrence` has no `ON DELETE CASCADE`, so
+"delete the source row" is **not** a valid rollback. To discard the data entirely,
+drop and re-create a **development** database; never delete source rows in a database
+whose occurrences must survive.
 
 ---
 
@@ -206,15 +238,18 @@ link, "also seen on".
 **Tasks**
 - OpenAPI-first: `docs/openapi.yaml` committed before handlers.
 - `GET /v1/jobs` (keyword, company, location, remote, employment_type, salary_min,
-  posted_after, status; opaque cursor; stable `(posted_at desc, id)` ordering).
+  posted_after, status; opaque cursor; stable `(sort_at DESC, id DESC)` ordering,
+  where `sort_at = coalesce(posted_at, first_seen_at)` is `NOT NULL` — see ADR 0004).
 - `GET /v1/jobs/{id}` — canonical record + all occurrences with source/apply URLs.
 - `GET /v1/sources`, `GET /v1/coverage`.
-- GIN index on `to_tsvector`, `pg_trgm` GIN on company/location; `ts_rank_cd` ordering.
+- GIN index on the generated `search_tsv`, `pg_trgm` GIN on company/location;
+  `ts_rank_cd` ordering. The column definition lives in `docs/schema.md` only.
 - Server-rendered minimal UI (Jinja) — no SPA build step to hand off.
 
 **Verification:** `pytest tests/api -q`; `curl '/v1/jobs?q=engineer&remote=remote'`;
 UI loads and every result exposes a working apply link.
-**Exit criteria:** p95 < 300ms at 100k synthetic rows (seeded benchmark test).
+**Exit criteria:** p95 < 300ms at **500k** synthetic rows (seeded benchmark test), and
+pagination returns no duplicate or skipped row while rows are inserted mid-page.
 **Rollback:** API is additive over existing tables.
 
 ---
@@ -268,74 +303,99 @@ acquirer will test. It gets its own step and its own executable proof.
 
 ---
 
-### S7 — Wave A: class-1 ATS, batch 1 (7 platforms)
+### S7 — Wave A: class-1 ATS residual (10 platforms)
 **Deps:** S6 · **Parallel group:** A · **Model:** default
 
 **Context brief:** Pattern-following work now that the SDK exists. Each connector:
 detect, list, detail, error classification, ≥2 tenant fixtures, golden output.
 
-**Platforms:** Lever, Ashby, SmartRecruiters, Workable, Recruitee, Teamtailor, Personio.
+**Platforms:** Lever, Ashby, SmartRecruiters, Workable, Recruitee, Breezy HR, Pinpoint,
+Comeet, Softgarden, Sympa. (Greenhouse was S3; these are the remaining C1 rows.)
 
 **Per-connector definition of done**
 1. `connectors/<platform>.py` implements the Protocol.
 2. Fixtures for ≥2 distinct employers, captured live, replayed offline.
 3. Golden normalized output reviewed by hand for at least 3 records.
-4. `docs/platforms.md` row updated: verified=yes, live example URL, connector path.
-5. A `fetch_run` row from a real run linked in `docs/coverage.md`.
+4. A `fetch_run` row from a real run exists for the connector, and
+   `python -m jobindex.cli coverage` regenerates the `Verified` column. The table is
+   **never** hand-edited to say `yes`.
+5. A live example URL and sample job id are present in the generated `docs/coverage.md`.
 
 **Verification:** `pytest tests/connectors -q`; `python -m jobindex.cli coverage --wave A`.
-**Exit criteria:** 7/7 working on ≥2 tenants; zero network in CI; coverage table regenerated.
+**Exit criteria:** 10/10 working on ≥2 tenants; zero network in CI; coverage table
+regenerated and committed as a diff.
 **Rollback:** per-connector revert; disable source flag.
 
 ---
 
-### S8 — Wave B: class-1 ATS, batch 2 (~10 platforms)
+### S8 — Wave B: mid-market embedded-JSON / XHR (15 platforms)
 **Deps:** S7 · **Parallel group:** B · **Model:** default
 
-**Platforms:** BambooHR, Breezy HR, Pinpoint, HiBob, Rippling, Comeet, Jobvite,
-Zoho Recruit, Freshteam, JobScore.
+**Platforms:** Teamtailor, Personio, BambooHR, HiBob, Rippling, Zoho Recruit, Newton,
+Gupy, Factorial, Kenoby, Deel, BrassRing, SilkRoad, Talentsoft, eRecruiter.
 
-Same definition of done as S7. Any platform that turns out not to expose a structured
-board is **demoted to class 3 and deferred to S13**, not hacked inline.
+Same definition of done as S7. These are tenant-templated but structurally simpler than
+the enterprise suites, which is why they follow Wave A before Wave C/D. Any platform
+that turns out not to expose a structured board is **demoted to class 3 and deferred to
+S13**, not hacked inline.
 
 ---
 
 ### S9 — Deduplication engine + labeled evaluation
-**Deps:** S7 (needs ≥2 overlapping sources) · **Parallel group:** B · **Model:** strongest
+**Deps:** S7, S12 (needs ATS **and** board sources to overlap) · **Parallel group:** B
+· **Model:** strongest
 
 **Context brief:** The core intellectual deliverable. Precision over recall: a merged
 pair of distinct reqs is worse than an unmerged duplicate. Blocking keys keep it
 sub-quadratic; thresholds come from measurement, not taste.
 
+**Why S12 and not S7:** a dedup engine evaluated only on ten ATS connectors has almost
+no true cross-source overlap — each ATS board is its own tenant universe. The board
+wave is where the same req visibly appears twice, so it is the first honest evaluation
+set.
+
 **Tasks**
-- Blocking: `(company_domain, title_stem)`, `(company_key, city_key)`,
-  `(apply_host, external_id)`.
+- Blocking: `(company_domain, title_stem)`, `(company_normalized, city_key)`,
+  `(apply_host, external_id)` across sources, `(company_domain, apply_host)`.
+  Every component used is a real column in `docs/schema.md` §5.
 - Similarity: normalized title (token set ratio), company, location, description
   shingles (MinHash or trigram Jaccard). Embeddings only if they beat cheap methods
   on the eval set.
 - Hard constraints: differing apply host **and** differing external id **and**
-  differing city ⇒ no merge without high description similarity.
-- Cluster assignment: union-find over accepted pairs; `dedup_cluster_id` on `job`;
-  per-occurrence titles/URLs preserved.
-- `docs/dedup-eval.md`: ~200 hand-labeled pairs (cross-source same job; near-identical
-  distinct jobs: same title/different city, same title/different req id, repost-with-edits).
-- Report precision, recall, F1, threshold sweep, and named failure modes.
+  differing city ⇒ no merge without high description similarity (ADR 0002 §4).
+- Cluster assignment: size-capped union-find over accepted pairs; `job.cluster_id` +
+  `is_canonical` + `merged_into_job_id`; per-occurrence titles/URLs preserved.
+- `docs/dedup.md`: labeled set, threshold sweep, named failure modes.
+
+**Evaluation protocol (blocking gate)**
+- ≥400 labeled **true-duplicate** pairs and ≥400 labeled **hard negatives**, drawn from
+  real captured Wave-E data. Not invented, not padded with easy negatives.
+- **30% holdout**, never touched during threshold tuning; the reported number comes
+  from the holdout only.
+- Gate: **Wilson 95% lower bound on precision ≥ 0.95** on the holdout. A point estimate
+  of 0.95 on 50 pairs is not evidence; the lower bound is.
+- Recall is reported honestly with its own interval. It is not gated.
 
 **Verification:** `python -m pytest tests/dedup -q && python -m jobindex.cli dedup eval`.
-**Exit criteria:** precision ≥ 0.95 on the labeled set; recall reported honestly;
-`docs/dedup.md` contains the numbers and the threshold rationale.
-**Rollback:** `dedup_cluster_id` nullable; engine is rerunnable from scratch.
+**Exit criteria:** holdout precision lower bound ≥ 0.95; the exact command and its
+output are pasted into `docs/dedup.md`; if the gate fails, thresholds do not ship and
+ADR 0002 stays `Proposed`.
+**Rollback:** `cluster_id`/`is_canonical` are nullable/defaulted; the engine is a batch
+job that can be re-run from scratch with a new `dedup_version`.
 
 ---
 
-### S10 — Wave C: enterprise embedded-JSON, batch 1 (6)
+### S10 — Wave C: enterprise embedded-JSON, batch 1 (8)
 **Deps:** S6 · **Parallel group:** A · **Model:** default
 
 **Context brief:** Distinct transport problem: JS-heavy career sites backed by a
 JSON/XML endpoint. Higher request cost, tenant path differences, sturdier payloads.
 
-**Platforms:** Workday, SAP SuccessFactors, Oracle Taleo (TBE + TEE counted separately),
-iCIMS, Oracle Recruiting Cloud.
+**Platforms:** Workday, SAP SuccessFactors, Oracle Taleo (TBE), Oracle Taleo (TEE),
+Oracle Recruiting Cloud, iCIMS, Phenom People, Eightfold AI.
+
+`Eightfold` has **no endpoint claim** in `docs/platforms.md` and is probe-first: if the
+probe finds nothing structured, it is demoted to S13 rather than guessed at.
 
 **Extra requirements:** tenant/site path templating; pagination contract tests;
 per-tenant config table so a new employer is configuration, not code.
@@ -345,13 +405,14 @@ is thin — recorded as a known limitation, not hidden).
 
 ---
 
-### S11 — Wave D: enterprise embedded-JSON, batch 2 (~11)
+### S11 — Wave D: enterprise embedded-JSON, batch 2 (8)
 **Deps:** S10 · **Parallel group:** B · **Model:** default
 
-**Platforms:** Phenom, Eightfold, Avature, Cornerstone OnDemand, PageUp, Dayforce,
-UKG Pro, ADP Workforce Now, Paylocity, Paycom, Paycor.
+**Platforms:** Cornerstone OnDemand, Dayforce, UKG Pro, ADP Workforce Now, Paylocity,
+Paycom, Bullhorn, PeopleSoft eRecruit.
 
-Reuses the tenant-config machinery from S10. Same evidence bar.
+Reuses the tenant-config machinery from S10. Same evidence bar. These are the highest
+`Risk: H` C2 rows, which is why they come last among the structured waves.
 
 ---
 
@@ -360,23 +421,32 @@ Reuses the tenant-config machinery from S10. Same evidence bar.
 
 **Context brief:** Boards are the legal and fragility frontier. Several major boards
 prohibit automated collection. Those are documented as **excluded** with reasoning,
-not half-implemented.
+not half-implemented. This wave is also S9's evaluation set, so it is not optional
+breadth.
 
-**Expected working:** Remote OK, Remotive, We Work Remotely (RSS), Himalayas, Jobicy,
-Working Nomads, Hacker News "Who is hiring", YC Work at a Startup, Niceboard,
-WP Job Manager, Built In, Wellfound, Otta.
+**In scope (9, all C4):** Remote OK, Remotive, We Work Remotely, Himalayas, Jobicy,
+Working Nomads, Hacker News "Who is hiring", WP Job Manager, Niceboard.
 
-**Expected excluded/blocked (documented):** LinkedIn, Indeed, Glassdoor, Monster,
-ZipRecruiter, SimplyHired, Dice — ToS prohibitions and/or hard bot defences.
-`docs/platforms.md` must show the reason per row and the coverage math both ways.
+**Deferred to S13 (2, C3):** Built In (HTML + `JobPosting` JSON-LD), Otta / Welcome to
+the Jungle (HTML listing).
+
+**Excluded (9, documented):** LinkedIn, Indeed, Glassdoor, ZipRecruiter, Monster, Dice,
+SimplyHired, Wellfound, YC Work at a Startup — ToS prohibitions, paid/partner-only APIs,
+or session gating. `docs/platforms.md` shows the reason per row and the coverage math
+both ways.
 
 ---
 
-### S13 — Wave F: HTML / headless residual
-**Deps:** S11, S12 · **Parallel group:** B · **Model:** default
+### S13 — Wave F: HTML / headless residual (18)
+**Deps:** S7, S8, S10, S11, S12 · **Parallel group:** B · **Model:** default
 
 **Context brief:** Only sources with no structured alternative justify a browser.
 Each one needs a written justification in `docs/platforms.md` and a fragility note.
+
+**In scope (18):** Avature, PageUp, Paycor, JazzHR, Jobvite, Trakstar Hire, JobScore,
+PCRecruiter, CATS, Freshteam, Manatal, ClearCompany, ApplicantPro, Hireology,
+TalentReef, Harri, Built In, Otta / Welcome to the Jungle — **plus** any C2 row demoted
+during S7/S8/S10/S11 probing.
 
 **Tasks:** Playwright-based connector base (browser pool, reuse, block-list of
 trackers, hard timeouts, screenshot on failure into the run record); convert each
@@ -385,21 +455,27 @@ unverified and is listed as such.
 
 ---
 
-### S14 — Coverage report generator + NFR measurement
-**Deps:** S9, S12 · **Model:** default
+### S14 — Coverage report + NFR measurement (final wave accounting)
+**Deps:** S9, S13 · **Model:** default
 
-**Context brief:** Coverage must be generated from `fetch_run`, not typed by hand.
+**Context brief:** The coverage command shipped in S2; this step is where it is
+**finished and trusted** — the last connector wave has run, so the report is now a
+measurement rather than a forecast.
 
 **Tasks**
-- `python -m jobindex.cli coverage` emits `docs/coverage.md` (and JSON) from DB:
+- Extend `python -m jobindex.cli coverage` to emit `docs/coverage.md` and JSON:
   per platform status, live example, sample job, last success, connector path,
-  tenants proven, open failures.
-- NFR harness: 7-day success rate, p95 staleness per tier, search p95 at 500k rows,
+  tenants proven, open failures, and **forecast vs measured** against
+  `docs/platforms.md` §3.
+- Regenerate the `Verified` column of `docs/platforms.md`; the working tree must be
+  clean after regeneration (proves the document is derived, not typed).
+- NFR harness: 7-day success rate, p95 staleness per tier, search p95 at **500k** rows,
   full-refresh wall time, closure/failure audit query.
 - `docs/nfr.md` records actuals vs targets, with the query used for each number.
 
-**Exit criteria:** every "working" row traces to a `fetch_run` id; every NFR prints
-a measured value or an explicit "not yet met".
+**Exit criteria:** every "working" row traces to a `fetch_run` id; every NFR prints a
+measured value or an explicit "not yet met"; forecast-vs-measured divergence is stated
+with a reason.
 
 ---
 
@@ -442,6 +518,7 @@ If a connector needs the strongest model, that is a signal the SDK is under-buil
 | Live-internet tests make CI flaky | S1 `no_network` fixture; S2 capture/replay |
 | Schema churn after 20 connectors | Slice 1 validates shape before scale; `job`/`job_occurrence` split |
 | ToS / blocking exposure | Structured-first policy, robots gate, identifiable UA, documented exclusions |
+| 78 connectors ≠ 500k jobs | Tenant acquisition is its own problem (ADR 0005); the count is measured in S14, not assumed in the plan |
 | Handoff cost | SDK + template + runbook + generated coverage, not prose claims |
 | Scope creep into job-seeker features | Explicit out-of-scope list in README |
 
@@ -459,11 +536,16 @@ is a process defect.
 ## 7. Approval gate
 
 Approve §2 (wave sequencing) and the class assignments in `docs/platforms.md` before
-S1 begins. Two things are most worth challenging now:
+S1 begins. Three things are most worth challenging now:
 
-1. **Wave ordering** — enterprise suites (S10–S11) are ~17 of 78 platforms but
-   roughly half the engineering risk. Doing boards first would show breadth sooner
-   but delay the hardest transport problem.
+1. **Wave ordering** — enterprise suites (S10–S11) are 16 of 78 platforms but roughly
+   half the engineering risk. Doing boards first would show breadth sooner but delay
+   the hardest transport problem. Boards also feed S9's evaluation set, so they are
+   not purely a breadth play.
 2. **Platform inventory** — `docs/platforms.md` reconstructs the 78 from the named
    families in the brief. If your real list differs, correct that table before S1;
-   it is the cheapest possible moment.
+   it is the cheapest possible moment. Every row must keep exactly one `Wave`.
+3. **Tenant acquisition** — ADR 0005 states the uncomfortable arithmetic: 78 platforms
+   at one or two tenants each yields **~20k–50k** jobs, not 500k. Reaching the stated
+   scale requires a tenant-discovery effort with its own cost. Approve the target tenant
+   count (or lower the 500k figure) before S1, because it changes what "done" means.

@@ -31,25 +31,29 @@ indexes for structured filters, `ts_rank_cd` for ordering within a relevance sor
 
 ### Indexes
 
+`search_tsv` is **defined once**, as a generated column in `docs/schema.md` §5. This
+ADR records why it exists and how it is indexed; it does not redefine the column. Two
+definitions of the same generated column would drift.
+
 ```sql
--- keyword
-ALTER TABLE job ADD COLUMN search_tsv tsvector
-  GENERATED ALWAYS AS (
-    setweight(to_tsvector('english', coalesce(title,'')), 'A') ||
-    setweight(to_tsvector('english', coalesce(company,'')), 'B') ||
-    setweight(to_tsvector('english', coalesce(description_text,'')), 'C')
-  ) STORED;
+-- keyword (column definition lives in docs/schema.md §5)
 CREATE INDEX job_search_tsv_gin ON job USING gin (search_tsv);
 
 -- company / location fuzzy
 CREATE INDEX job_company_trgm ON job USING gin (company_normalized gin_trgm_ops);
-CREATE INDEX job_location_trgm ON job USING gin ((city_raw || ' ' || region_raw) gin_trgm_ops);
+CREATE INDEX job_location_trgm ON job USING gin ((coalesce(city_raw,'') || ' ' || coalesce(region_raw,'')) gin_trgm_ops);
 
--- filters + ordering
-CREATE INDEX job_status_posted ON job (status, posted_at DESC NULLS LAST, id DESC);
+-- filters + keyset ordering
+CREATE INDEX job_status_sort ON job (status, sort_at DESC, id DESC);
+CREATE INDEX job_sort ON job (sort_at DESC, id DESC) WHERE is_canonical;
 CREATE INDEX job_remote_type ON job (remote_status, employment_type) WHERE status = 'open';
-CREATE INDEX job_salary_floor ON job (salary_min_normalized) WHERE salary_min_normalized IS NOT NULL;
+CREATE INDEX job_salary_floor ON job (salary_min) WHERE salary_min IS NOT NULL;
 ```
+
+`sort_at` is `GENERATED ALWAYS AS (coalesce(posted_at, first_seen_at)) STORED` and is
+therefore `NOT NULL` — that is the whole point of it. Ordering on `posted_at` directly
+is `NULL`-unsafe: `WHERE (posted_at, id) < ($ts, $id)` silently drops every row with a
+null `posted_at`, and a `NULLS LAST` sort cannot be used as a keyset boundary.
 
 ### Query construction
 
@@ -58,21 +62,26 @@ CREATE INDEX job_salary_floor ON job (salary_min_normalized) WHERE salary_min_no
 - Company: exact match on `company_normalized` first; fall back to trigram similarity
   with a floor (`similarity(...) >= 0.6`) and a bounded result set.
 - Relevance ordering: `ts_rank_cd(search_tsv, query)`; default ordering for the UI is
-  `posted_at DESC NULLS LAST, id DESC` because recency beats relevance in job search.
+  `sort_at DESC, id DESC` because recency beats relevance in job search.
 - Every filter is applied as a conjunctive `WHERE`; the primary query uses
   `EXPLAIN (ANALYZE, BUFFERS)` in CI to assert the plan uses the intended index and
-  performs no sequential scan on `job` at 100k+ rows.
+  performs no sequential scan on `job` at **500k** rows.
 
 ### Pagination
 
-Opaque cursor encoding `(sort_key, id)`; `WHERE (posted_at, id) < ($ts, $id)`. Offset
-pagination is rejected — it degrades linearly and produces duplicates as data shifts
-during paging.
+Opaque cursor encoding `(sort_at, id)`; the page predicate is
+`WHERE (sort_at, id) < ($sort_at, $id)` with `ORDER BY sort_at DESC, id DESC`.
+This is total and `NULL`-safe because `sort_at` is `NOT NULL` by construction, and
+`id` breaks ties. Offset pagination is rejected — it degrades linearly and produces
+duplicates and skips as data shifts during paging.
+
+`/v1/jobs` additionally filters `is_canonical = true`, so a merged duplicate stops
+appearing without its row being deleted.
 
 ### Degradation path
 
 If the query text is empty, skip FTS entirely and serve the structured filters off
-`job_status_posted`. The UI's default view must never pay for a tsquery it does not need.
+`job_status_sort`. The UI's default view must never pay for a tsquery it does not need.
 
 ## Measured triggers for revisiting
 
