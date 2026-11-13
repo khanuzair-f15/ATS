@@ -10,12 +10,12 @@ Deliberately absent in S1: `source_run_queue` (S5), `dedup_candidate`,
 
 from __future__ import annotations
 
-import sqlalchemy
 import uuid
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+import sqlalchemy
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -310,6 +310,15 @@ class Job(Base):
             postgresql_where=text("is_canonical AND cluster_id IS NOT NULL"),
         ),
         Index("job_open_liveness", "id", postgresql_where=text("status = 'open'")),
+        Index("job_salary_floor", "salary_min", postgresql_where=text("salary_min IS NOT NULL")),
+        Index("job_sort", "sort_at", postgresql_where=text("is_canonical")),
+        Index(
+            "job_remote_type",
+            "remote_status",
+            "employment_type",
+            postgresql_where=text("status = 'open'"),
+        ),
+        Index("job_status_sort", "status", text("sort_at DESC"), "id"),
     )
 
 
