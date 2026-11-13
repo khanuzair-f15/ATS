@@ -43,49 +43,14 @@ from jobindex.db.enums import (
     TenantStatus,
     TransportClass,
 )
-from jobindex.db.session import get_session_factory
 from jobindex.platforms import load_platform_rows
 
 pytestmark = pytest.mark.db
 
 
-async def _db_reachable() -> bool:
-    """Quick probe: can we connect to the configured database?"""
-    try:
-        from sqlalchemy.ext.asyncio import create_async_engine
-
-        from jobindex.settings import get_settings
-
-        settings = get_settings()
-        engine = create_async_engine(
-            settings.database_url, pool_pre_ping=True, connect_args={"timeout": 3}
-        )
-        async with engine.connect() as conn:
-            from sqlalchemy import text
-            await conn.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        return False
-
-
-@pytest.fixture(scope="module", autouse=True)
-async def require_db() -> None:
-    """Skip the entire module if the database is not reachable."""
-    if not await _db_reachable():
-        pytest.skip("JOBINDEX_DATABASE_URL not set or database not reachable")
-
-
 # ============================================================================
 # Test fixtures
 # ============================================================================
-
-@pytest.fixture
-async def db_session():
-    """Provide a database session for each test."""
-    async with get_session_factory()() as session:
-        yield session
-        await session.rollback()
-
 
 @pytest.fixture
 async def test_platform(db_session):
@@ -128,7 +93,7 @@ async def test_source(db_session, test_platform):
 # Circular job/cluster insertion tests
 # ============================================================================
 
-async def test_circular_fk_job_cluster_insertion(db_session, test_source):
+async def test_circular_fk_job_cluster_insertion(db_session, test_source) -> None:
     """Test the correct insertion order for job → job_cluster → job.update.
 
     The only valid write order inside one transaction is:
@@ -176,7 +141,7 @@ async def test_circular_fk_job_cluster_insertion(db_session, test_source):
     assert loaded_cluster.canonical_job_id == canonical_job.id
 
 
-async def test_canonical_consistency_enforced(db_session, test_source):
+async def test_canonical_consistency_enforced(db_session, test_source) -> None:
     """Test that canonical_job_id must point to a job with is_canonical=true in same cluster."""
     # Create a cluster
     cluster = JobCluster(
@@ -210,7 +175,7 @@ async def test_canonical_consistency_enforced(db_session, test_source):
     await db_session.commit()
 
 
-async def test_non_canonical_job_merged_into(db_session, test_source):
+async def test_non_canonical_job_merged_into(db_session, test_source) -> None:
     """Test that non-canonical jobs have merged_into_job_id set."""
     canonical_job = Job(
         origin_source_id=test_source.id,
@@ -262,7 +227,7 @@ async def test_non_canonical_job_merged_into(db_session, test_source):
 # Liveness invariant tests
 # ============================================================================
 
-async def test_open_job_requires_live_occurrence(db_session, test_source):
+async def test_open_job_requires_live_occurrence(db_session, test_source) -> None:
     """Test that an open job cannot exist with zero live occurrences."""
     job = Job(
         origin_source_id=test_source.id,
@@ -305,7 +270,7 @@ async def test_open_job_requires_live_occurrence(db_session, test_source):
     await db_session.commit()
 
 
-async def test_job_status_change_requires_live_occurrence(db_session, test_source):
+async def test_job_status_change_requires_live_occurrence(db_session, test_source) -> None:
     """Test that setting job.status='open' requires a live occurrence."""
     job = Job(
         origin_source_id=test_source.id,
@@ -327,7 +292,7 @@ async def test_job_status_change_requires_live_occurrence(db_session, test_sourc
         await db_session.commit()
 
 
-async def test_reopen_path(db_session, test_source):
+async def test_reopen_path(db_session, test_source) -> None:
     """Test the correct reopen path: occurrence is_live=true first, then job status."""
     job = Job(
         origin_source_id=test_source.id,
@@ -376,7 +341,7 @@ async def test_reopen_path(db_session, test_source):
 # first_seen_at immutability tests
 # ============================================================================
 
-async def test_first_seen_at_immutable(db_session, test_source):
+async def test_first_seen_at_immutable(db_session, test_source) -> None:
     """Test that job.first_seen_at cannot be modified after insert."""
     job = Job(
         origin_source_id=test_source.id,
@@ -411,7 +376,7 @@ async def test_first_seen_at_immutable(db_session, test_source):
 # Closure evidence tests
 # ============================================================================
 
-async def test_closed_requires_evidence(db_session, test_source):
+async def test_closed_requires_evidence(db_session, test_source) -> None:
     """Test that job.status='closed' requires closure_evidence_kind and closure_evidence_at."""
     job = Job(
         origin_source_id=test_source.id,
@@ -437,7 +402,7 @@ async def test_closed_requires_evidence(db_session, test_source):
     await db_session.commit()
 
 
-async def test_open_forbids_evidence(db_session, test_source):
+async def test_open_forbids_evidence(db_session, test_source) -> None:
     """Test that job.status='open' forbids closure evidence."""
     job = Job(
         origin_source_id=test_source.id,
@@ -457,7 +422,7 @@ async def test_open_forbids_evidence(db_session, test_source):
         await db_session.commit()
 
 
-async def test_stale_requires_since(db_session, test_source):
+async def test_stale_requires_since(db_session, test_source) -> None:
     """Test that job.status='stale' requires stale_since_at."""
     job = Job(
         origin_source_id=test_source.id,
@@ -479,7 +444,7 @@ async def test_stale_requires_since(db_session, test_source):
 # Closure candidate view tests
 # ============================================================================
 
-async def test_closure_candidate_view_logic(db_session, test_source):
+async def test_closure_candidate_view_logic(db_session, test_source) -> None:
     """Test the job_closure_candidates view logic.
 
     Candidates must satisfy:
@@ -539,7 +504,7 @@ async def test_closure_candidate_view_logic(db_session, test_source):
     )
 
 
-async def test_closure_candidate_excludes_incomplete_listing(db_session, test_source):
+async def test_closure_candidate_excludes_incomplete_listing(db_session, test_source) -> None:
     """Test that incomplete listings don't qualify for closure."""
     stale_job = Job(
         origin_source_id=test_source.id,
@@ -585,7 +550,7 @@ async def test_closure_candidate_excludes_incomplete_listing(db_session, test_so
     assert stale_job.id not in candidates
 
 
-async def test_closure_candidate_excludes_failed_fetch(db_session, test_source):
+async def test_closure_candidate_excludes_failed_fetch(db_session, test_source) -> None:
     """Test that failed/abandoned/partial fetch runs don't qualify."""
     stale_job = Job(
         origin_source_id=test_source.id,
@@ -630,7 +595,7 @@ async def test_closure_candidate_excludes_failed_fetch(db_session, test_source):
     assert stale_job.id not in candidates
 
 
-async def test_closure_candidate_excludes_partial_listing(db_session, test_source):
+async def test_closure_candidate_excludes_partial_listing(db_session, test_source) -> None:
     """Test that partial outcome doesn't qualify."""
     stale_job = Job(
         origin_source_id=test_source.id,
@@ -675,7 +640,7 @@ async def test_closure_candidate_excludes_partial_listing(db_session, test_sourc
     assert stale_job.id not in candidates
 
 
-async def test_closure_candidate_excludes_fetch_before_stale(db_session, test_source):
+async def test_closure_candidate_excludes_fetch_before_stale(db_session, test_source) -> None:
     """Test that fetch_run must be AFTER stale_since_at."""
     stale_job = Job(
         origin_source_id=test_source.id,
@@ -724,7 +689,7 @@ async def test_closure_candidate_excludes_fetch_before_stale(db_session, test_so
 # Closure evidence kind tests
 # ============================================================================
 
-async def test_explicit_closure_evidence(db_session, test_source):
+async def test_explicit_closure_evidence(db_session, test_source) -> None:
     """Test explicit closure evidence kinds."""
     evidence_kinds = [
         ClosureEvidence.HTTP_404,
@@ -756,7 +721,7 @@ async def test_explicit_closure_evidence(db_session, test_source):
 # Failed/incomplete fetch tests
 # ============================================================================
 
-async def test_failed_fetch_never_closes(db_session, test_source):
+async def test_failed_fetch_never_closes(db_session, test_source) -> None:
     """Test that failed fetch outcomes never cause absence-based closure."""
     job = Job(
         origin_source_id=test_source.id,
@@ -800,7 +765,7 @@ async def test_failed_fetch_never_closes(db_session, test_source):
     assert reloaded.status == JobStatus.OPEN
 
 
-async def test_timeout_does_not_close(db_session, test_source):
+async def test_timeout_does_not_close(db_session, test_source) -> None:
     """Test that timeout (error_class='transient') doesn't close jobs."""
     job = Job(
         origin_source_id=test_source.id,
@@ -843,7 +808,7 @@ async def test_timeout_does_not_close(db_session, test_source):
     assert reloaded.status == JobStatus.OPEN
 
 
-async def test_partial_listing_does_not_close(db_session, test_source):
+async def test_partial_listing_does_not_close(db_session, test_source) -> None:
     """Test that partial listing doesn't cause closure."""
     job = Job(
         origin_source_id=test_source.id,
@@ -887,7 +852,7 @@ async def test_partial_listing_does_not_close(db_session, test_source):
     assert reloaded.status == JobStatus.OPEN
 
 
-async def test_abandoned_fetch_does_not_close(db_session, test_source):
+async def test_abandoned_fetch_does_not_close(db_session, test_source) -> None:
     """Test that abandoned (crashed) fetch doesn't close jobs."""
     job = Job(
         origin_source_id=test_source.id,
@@ -934,7 +899,7 @@ async def test_abandoned_fetch_does_not_close(db_session, test_source):
 # Constraint tests
 # ============================================================================
 
-async def test_platform_family_known(db_session):
+async def test_platform_family_known(db_session) -> None:
     """Test platform.family CHECK constraint."""
     platform = Platform(
         key="bad_family",
@@ -952,7 +917,7 @@ async def test_platform_family_known(db_session):
         await db_session.commit()
 
 
-async def test_platform_outstanding_requires_reason(db_session):
+async def test_platform_outstanding_requires_reason(db_session) -> None:
     """Test platform.outstanding_requires_reason constraint."""
     platform = Platform(
         key="bad_outstanding",
@@ -970,7 +935,7 @@ async def test_platform_outstanding_requires_reason(db_session):
         await db_session.commit()
 
 
-async def test_source_config_no_secrets(db_session, test_platform):
+async def test_source_config_no_secrets(db_session, test_platform) -> None:
     """Test source.config_no_secrets constraint."""
     source = Source(
         platform_key=test_platform.key,
@@ -986,7 +951,7 @@ async def test_source_config_no_secrets(db_session, test_platform):
         await db_session.commit()
 
 
-async def test_job_salary_range_valid(db_session, test_source):
+async def test_job_salary_range_valid(db_session, test_source) -> None:
     """Test job.salary_range_valid constraint."""
     job = Job(
         origin_source_id=test_source.id,
@@ -1006,7 +971,7 @@ async def test_job_salary_range_valid(db_session, test_source):
         await db_session.commit()
 
 
-async def test_job_salary_currency_required(db_session, test_source):
+async def test_job_salary_currency_required(db_session, test_source) -> None:
     """Test job.salary_currency_required constraint."""
     job = Job(
         origin_source_id=test_source.id,
@@ -1025,7 +990,7 @@ async def test_job_salary_currency_required(db_session, test_source):
         await db_session.commit()
 
 
-async def test_job_country_code_iso2(db_session, test_source):
+async def test_job_country_code_iso2(db_session, test_source) -> None:
     """Test job.country_code_iso2 constraint."""
     job = Job(
         origin_source_id=test_source.id,
@@ -1043,7 +1008,7 @@ async def test_job_country_code_iso2(db_session, test_source):
         await db_session.commit()
 
 
-async def test_job_salary_currency_iso4217(db_session, test_source):
+async def test_job_salary_currency_iso4217(db_session, test_source) -> None:
     """Test job.salary_currency_iso4217 constraint."""
     job = Job(
         origin_source_id=test_source.id,
@@ -1062,7 +1027,7 @@ async def test_job_salary_currency_iso4217(db_session, test_source):
         await db_session.commit()
 
 
-async def test_source_unique_tenant(db_session, test_platform):
+async def test_source_unique_tenant(db_session, test_platform) -> None:
     """Test source UNIQUE(platform_key, tenant_key)."""
     source1 = Source(
         platform_key=test_platform.key,
@@ -1087,7 +1052,7 @@ async def test_source_unique_tenant(db_session, test_platform):
         await db_session.commit()
 
 
-async def test_job_origin_identity_unique(db_session, test_source):
+async def test_job_origin_identity_unique(db_session, test_source) -> None:
     """Test job UNIQUE(origin_source_id, origin_external_id)."""
     job1 = Job(
         origin_source_id=test_source.id,
@@ -1116,7 +1081,7 @@ async def test_job_origin_identity_unique(db_session, test_source):
         await db_session.commit()
 
 
-async def test_occurrence_identity_unique(db_session, test_source):
+async def test_occurrence_identity_unique(db_session, test_source) -> None:
     """Test job_occurrence UNIQUE(source_id, external_id)."""
     job = Job(
         origin_source_id=test_source.id,
@@ -1157,7 +1122,7 @@ async def test_occurrence_identity_unique(db_session, test_source):
         await db_session.commit()
 
 
-async def test_change_event_idempotent(db_session, test_source):
+async def test_change_event_idempotent(db_session, test_source) -> None:
     """Test change_event UNIQUE(occurrence_id, field, new_value, fetch_run_id)."""
     job = Job(
         origin_source_id=test_source.id,
@@ -1221,7 +1186,7 @@ async def test_change_event_idempotent(db_session, test_source):
 # Partial index tests
 # ============================================================================
 
-async def test_partial_index_job_one_canonical_per_cluster(db_session, test_source):
+async def test_partial_index_job_one_canonical_per_cluster(db_session, test_source) -> None:
     """Test job_one_canonical_per_cluster partial unique index."""
     # Create two canonical jobs in same cluster - should fail
     job1 = Job(
@@ -1255,7 +1220,7 @@ async def test_partial_index_job_one_canonical_per_cluster(db_session, test_sour
         await db_session.commit()
 
 
-async def test_partial_index_job_open_liveness(db_session, test_source):
+async def test_partial_index_job_open_liveness(db_session, test_source) -> None:
     """Test job_open_liveness partial index exists (behavioral test)."""
     # Just verify we can create open jobs
     job = Job(
@@ -1272,7 +1237,7 @@ async def test_partial_index_job_open_liveness(db_session, test_source):
     await db_session.commit()
 
 
-async def test_partial_index_job_sort(db_session, test_source):
+async def test_partial_index_job_sort(db_session, test_source) -> None:
     """Test job_sort partial index (WHERE is_canonical)."""
     job = Job(
         origin_source_id=test_source.id,
@@ -1288,7 +1253,7 @@ async def test_partial_index_job_sort(db_session, test_source):
     await db_session.commit()
 
 
-async def test_partial_index_job_remote_type(db_session, test_source):
+async def test_partial_index_job_remote_type(db_session, test_source) -> None:
     """Test job_remote_type partial index (WHERE status='open')."""
     job = Job(
         origin_source_id=test_source.id,
@@ -1306,7 +1271,7 @@ async def test_partial_index_job_remote_type(db_session, test_source):
     await db_session.commit()
 
 
-async def test_partial_index_job_salary_floor(db_session, test_source):
+async def test_partial_index_job_salary_floor(db_session, test_source) -> None:
     """Test job_salary_floor partial index (WHERE salary_min IS NOT NULL)."""
     job = Job(
         origin_source_id=test_source.id,
@@ -1322,7 +1287,7 @@ async def test_partial_index_job_salary_floor(db_session, test_source):
     await db_session.commit()
 
 
-async def test_partial_index_source_due(db_session, test_platform):
+async def test_partial_index_source_due(db_session, test_platform) -> None:
     """Test source_due partial index (WHERE enabled)."""
     source = Source(
         platform_key=test_platform.key,
@@ -1336,7 +1301,7 @@ async def test_partial_index_source_due(db_session, test_platform):
     await db_session.commit()
 
 
-async def test_partial_index_fetch_run_failures(db_session, test_source):
+async def test_partial_index_fetch_run_failures(db_session, test_source) -> None:
     """Test fetch_run_failures partial index (WHERE outcome IN ('failure','abandoned'))."""
     fetch_run = FetchRun(
         source_id=test_source.id,
@@ -1348,7 +1313,7 @@ async def test_partial_index_fetch_run_failures(db_session, test_source):
     await db_session.commit()
 
 
-async def test_partial_index_fetch_run_complete_listing(db_session, test_source):
+async def test_partial_index_fetch_run_complete_listing(db_session, test_source) -> None:
     """Test fetch_run_complete_listing partial index (WHERE listing_complete)."""
     fetch_run = FetchRun(
         source_id=test_source.id,
@@ -1361,7 +1326,7 @@ async def test_partial_index_fetch_run_complete_listing(db_session, test_source)
     await db_session.commit()
 
 
-async def test_partial_index_occurrence_job_live(db_session, test_source):
+async def test_partial_index_occurrence_job_live(db_session, test_source) -> None:
     """Test occurrence_job_live partial index (WHERE is_live)."""
     job = Job(
         origin_source_id=test_source.id,
@@ -1393,7 +1358,7 @@ async def test_partial_index_occurrence_job_live(db_session, test_source):
 # Generated column tests
 # ============================================================================
 
-async def test_job_sort_at_generated(db_session, test_source):
+async def test_job_sort_at_generated(db_session, test_source) -> None:
     """Test job.sort_at generated column."""
     # With posted_at
     job1 = Job(
@@ -1425,7 +1390,7 @@ async def test_job_sort_at_generated(db_session, test_source):
     assert job2.sort_at == job2.first_seen_at
 
 
-async def test_job_search_tsv_generated(db_session, test_source):
+async def test_job_search_tsv_generated(db_session, test_source) -> None:
     """Test job.search_tsv generated column."""
     job = Job(
         origin_source_id=test_source.id,
@@ -1444,7 +1409,7 @@ async def test_job_search_tsv_generated(db_session, test_source):
     assert "python" in str(job.search_tsv).lower()
 
 
-async def test_occurrence_apply_url_generated(db_session, test_source):
+async def test_occurrence_apply_url_generated(db_session, test_source) -> None:
     """Test job_occurrence.apply_url generated column."""
     job = Job(
         origin_source_id=test_source.id,
@@ -1473,7 +1438,7 @@ async def test_occurrence_apply_url_generated(db_session, test_source):
     assert occurrence.apply_url == "https://test.example.com/apply/1"
 
 
-async def test_fetch_run_listing_complete_default(db_session, test_source):
+async def test_fetch_run_listing_complete_default(db_session, test_source) -> None:
     """Test fetch_run.listing_complete defaults to false."""
     fetch_run = FetchRun(source_id=test_source.id)
     db_session.add(fetch_run)
@@ -1486,7 +1451,7 @@ async def test_fetch_run_listing_complete_default(db_session, test_source):
 # Seed data verification
 # ============================================================================
 
-async def test_platform_seed_78_rows(db_session):
+async def test_platform_seed_78_rows(db_session) -> None:
     """Verify all 78 platforms are seeded."""
     result = await db_session.execute(select(Platform))
     platforms = result.scalars().all()
@@ -1510,14 +1475,14 @@ async def test_platform_seed_78_rows(db_session):
         assert db_row.coverage_reason == doc_row.coverage_reason
 
 
-async def test_platform_transport_null(db_session):
+async def test_platform_transport_null(db_session) -> None:
     """Verify all platforms have transport=NULL in seed."""
     result = await db_session.execute(select(Platform))
     for platform in result.scalars().all():
         assert platform.transport is None
 
 
-async def test_platform_coverage_outstanding(db_session):
+async def test_platform_coverage_outstanding(db_session) -> None:
     """Verify all platforms have coverage_state='outstanding'."""
     result = await db_session.execute(select(Platform))
     for platform in result.scalars().all():

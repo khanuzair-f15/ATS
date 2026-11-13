@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import socket
-import sys
 from collections.abc import Generator
 
 import pytest
@@ -67,12 +66,7 @@ def no_network(request: pytest.FixtureRequest) -> Generator[None, None, None]:
 # -----------------------------------------------------------------------------
 # Event loop policy for pytest-asyncio (avoids "no current event loop" on Windows)
 # -----------------------------------------------------------------------------
-@pytest.fixture(scope="session")
-def event_loop_policy() -> None:
-    if sys.platform == "win32":
-        import asyncio
-
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+# Configured via pyproject.toml: asyncio_default_fixture_loop_scope = "function"
 
 
 # -----------------------------------------------------------------------------
