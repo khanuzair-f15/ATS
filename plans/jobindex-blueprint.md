@@ -1,8 +1,9 @@
 # JobIndex — Construction Plan
 
 **Objective:** A single, deduplicated, searchable index of job postings harvested from 78
-source platforms (58 ATS + 20 job boards), with auditable freshness, correct
-closure-vs-failure semantics, and a handoff package a new team can operate.
+source platforms (58 ATS + 20 job-board software platforms, brief-exact and frozen in
+`docs/brief-platforms.txt`), with auditable freshness, correct closure-vs-failure
+semantics, and a handoff package a new team can operate.
 
 **Scope class:** EPIC. Multi-session, multi-wave. Not a single-pass build.
 
@@ -19,7 +20,7 @@ closure-vs-failure semantics, and a handoff package a new team can operate.
 | GitHub CLI | **absent** → direct mode, no automated PR/CI |
 | Python | 3.12.10 present; `py` launcher broken, use `python` |
 | Postgres | not yet provisioned (Step 1) |
-| Stakeholder decisions | Python/FastAPI; acquisition-demo bar; ~500k active jobs at 6–24h refresh; structured sources first, headless as last resort |
+| Stakeholder decisions | Python/FastAPI; acquisition-demo bar; 500k-job design benchmark at 6–24h refresh (non-contractual, ADR 0005); structured sources first, headless as last resort |
 
 **Workflow for every step (direct mode):** create a local branch `step/<n>-<slug>`,
 do the work, run the step's verification command, merge to `main` with a
@@ -94,20 +95,24 @@ most expensive to change after 20 connectors. This step produces documents only.
   tiered refresh, circuit breaker.
 - `docs/adr/0004-search.md` — Postgres FTS + `pg_trgm`, ranking, cursor pagination,
   measured triggers for adding an external engine.
-- `docs/adr/0005-tenants-and-secrets.md` — how ~500k jobs is reached from 78 platforms
-  (tenant acquisition arithmetic), tenant lifecycle, and secret resolution.
+- `docs/adr/0005-tenants-and-secrets.md` — platform coverage (A), tenant discovery (B)
+  and the 500k benchmark (C) kept separate; tenant lifecycle and secret resolution.
 - `docs/schema.md` — `platform`, `source`, `job`, `job_cluster`, `job_occurrence`,
   `fetch_run`, `change_event`, enums, indexes, invariants, closure state machine,
   liveness enforcement, explicit S1 table set.
-- `docs/platforms.md` — all 78 classified by transport, **owned by exactly one wave**,
-  verification status, expected request volume, risk, and what is explicitly out of scope.
+- `docs/platforms.md` — the brief's exact 78 names classified by transport, **owned by
+  exactly one wave**, coverage state, expected request volume, risk, and what is
+  explicitly out of scope.
+- `docs/brief-platforms.txt` — frozen verbatim manifest (58 ATS + 20 BOARD) that the
+  inventory is checked against.
 - `plans/MUTATIONS.md` — the plan mutation log, opened with M-001 (review remediation).
 - This plan.
 
-**Verification:** `docs/platforms.md` row count = 78; every platform row has exactly one
-`Wave`, the wave counts sum to 78, and the class counts match the stated distribution;
-every table in `docs/schema.md` has a stated primary key and owner; ADR 0001 states a
-decision, not a survey.
+**Verification:** `python scripts/verify_phase0.py` — `docs/brief-platforms.txt` and
+`docs/platforms.md` agree row-for-row both directions (58 ATS + 20 BOARD = 78); every
+platform row has exactly one `Wave`; wave counts sum to 78; class counts match the stated
+distribution; no `EX` row; every table in `docs/schema.md` has a stated primary key and
+owner; ADR 0001 states a decision, not a survey.
 
 **Exit criteria:** stakeholder approves wave sequencing in §2.
 
@@ -174,10 +179,10 @@ produce permanent offline tests.
 - `connectors/_template/` — a runnable reference connector plus
   `docs/adding-a-connector.md` (the "add a platform in an afternoon" guide).
 - `jobindex.cli coverage` — **ships here, not in S14.** It reads `platform`,
-  `source`, `fetch_run` and regenerates `docs/platforms.md`'s `Verified` column and
-  `docs/coverage.md`. Generating evidence must exist before the first connector, or
-  `verified` is a human-edited claim (review C9). S14 extends this command with NFR
-  measurements; it does not introduce it.
+  `source`, `fetch_run` and regenerates `docs/platforms.md`'s `Coverage` column across
+  the four states plus `docs/coverage.md`. Generating evidence must exist before the
+  first connector, or `verified` is a human-edited claim (review C9). S14 extends this
+  command with NFR measurements; it does not introduce it.
 - Rate limiter: default 1 concurrent request per host, jittered delay, configurable
   per connector; identifiable UA with contact URL; `robots.txt` enforced for
   HTML-class connectors only.
@@ -309,16 +314,16 @@ acquirer will test. It gets its own step and its own executable proof.
 **Context brief:** Pattern-following work now that the SDK exists. Each connector:
 detect, list, detail, error classification, ≥2 tenant fixtures, golden output.
 
-**Platforms:** Lever, Ashby, SmartRecruiters, Workable, Recruitee, Breezy HR, Pinpoint,
-Comeet, Softgarden, Sympa. (Greenhouse was S3; these are the remaining C1 rows.)
+**Platforms:** Lever.co, Ashby, SmartRecruiters, Workable, Recruitee, Breezy HR, Pinpoint,
+Comeet, Personio, Manatal. (Greenhouse was S3; these are the remaining C1 rows.)
 
 **Per-connector definition of done**
 1. `connectors/<platform>.py` implements the Protocol.
 2. Fixtures for ≥2 distinct employers, captured live, replayed offline.
 3. Golden normalized output reviewed by hand for at least 3 records.
 4. A `fetch_run` row from a real run exists for the connector, and
-   `python -m jobindex.cli coverage` regenerates the `Verified` column. The table is
-   **never** hand-edited to say `yes`.
+   `python -m jobindex.cli coverage` regenerates the `Coverage` column. The table is
+   **never** hand-edited to say `verified`.
 5. A live example URL and sample job id are present in the generated `docs/coverage.md`.
 
 **Verification:** `pytest tests/connectors -q`; `python -m jobindex.cli coverage --wave A`.
@@ -328,11 +333,10 @@ regenerated and committed as a diff.
 
 ---
 
-### S8 — Wave B: mid-market embedded-JSON / XHR (15 platforms)
+### S8 — Wave B: mid-market embedded-JSON / XHR (6 platforms)
 **Deps:** S7 · **Parallel group:** B · **Model:** default
 
-**Platforms:** Teamtailor, Personio, BambooHR, HiBob, Rippling, Zoho Recruit, Newton,
-Gupy, Factorial, Kenoby, Deel, BrassRing, SilkRoad, Talentsoft, eRecruiter.
+**Platforms:** Teamtailor, BambooHR, HiBob, Rippling, Zoho Recruit, Deel.
 
 Same definition of done as S7. These are tenant-templated but structurally simpler than
 the enterprise suites, which is why they follow Wave A before Wave C/D. Any platform
@@ -391,11 +395,12 @@ job that can be re-run from scratch with a new `dedup_version`.
 **Context brief:** Distinct transport problem: JS-heavy career sites backed by a
 JSON/XML endpoint. Higher request cost, tenant path differences, sturdier payloads.
 
-**Platforms:** Workday, SAP SuccessFactors, Oracle Taleo (TBE), Oracle Taleo (TEE),
-Oracle Recruiting Cloud, iCIMS, Phenom People, Eightfold AI.
+**Platforms:** Workday, SAP SuccessFactors, Taleo, Oracle Recruiting, iCIMS, Phenom
+People, CSOD, BrassRing.
 
-`Eightfold` has **no endpoint claim** in `docs/platforms.md` and is probe-first: if the
-probe finds nothing structured, it is demoted to S13 rather than guessed at.
+`Taleo` is a single platform row; TBE and TEE are transport variants probed per tenant,
+not separate platforms. `CSOD` and `BrassRing` are the highest-risk rows here and are
+probe-first: if no structured path is found they are demoted to S13 rather than guessed at.
 
 **Extra requirements:** tenant/site path templating; pagination contract tests;
 per-tenant config table so a new employer is configuration, not code.
@@ -405,48 +410,50 @@ is thin — recorded as a known limitation, not hidden).
 
 ---
 
-### S11 — Wave D: enterprise embedded-JSON, batch 2 (8)
+### S11 — Wave D: payroll/PEO and token-gated APIs (7)
 **Deps:** S10 · **Parallel group:** B · **Model:** default
 
-**Platforms:** Cornerstone OnDemand, Dayforce, UKG Pro, ADP Workforce Now, Paylocity,
-Paycom, Bullhorn, PeopleSoft eRecruit.
+**Platforms:** ADP, Dayforce, UltiPro, Paycom, Paylocity, Freshteam, HiringThing.
 
-Reuses the tenant-config machinery from S10. Same evidence bar. These are the highest
-`Risk: H` C2 rows, which is why they come last among the structured waves.
+Reuses the tenant-config machinery from S10. Same evidence bar. `Freshteam` and
+`HiringThing` are documented APIs whose credentials are publisher-held; without a token
+the row stays `outstanding` with that reason (ADR 0005 §D), never worked around. These
+are the highest `Risk: H/M` C2 rows, which is why they come last among the structured
+waves.
 
 ---
 
-### S12 — Wave E: job boards (structured subset)
+### S12 — Wave E: job-board software platforms (20)
 **Deps:** S6 · **Parallel group:** A · **Model:** default
 
-**Context brief:** Boards are the legal and fragility frontier. Several major boards
-prohibit automated collection. Those are documented as **excluded** with reasoning,
-not half-implemented. This wave is also S9's evaluation set, so it is not optional
-breadth.
+**Context brief:** These are **multi-tenant job-board software platforms**, not consumer
+job boards. One connector per platform should serve many board instances. Most transports
+are undocumented, so this wave begins with a probe per platform and replaces `TBD` in
+`docs/platforms.md` with the observed engine, one commit per platform. This wave is also
+S9's evaluation set, so it is not optional breadth.
 
-**In scope (9, all C4):** Remote OK, Remotive, We Work Remotely, Himalayas, Jobicy,
-Working Nomads, Hacker News "Who is hiring", WP Job Manager, Niceboard.
+**In scope (20, all C4):** Niceboard, WP Job Manager, JobKit, Jobboardly, Jobiqo,
+JBoard.io, JobBoardFire, SmartJobBoard, JobBoard.io, Wiley Madgex, Talenetic, JobMount,
+CareerSiteCloud, JobBoard.com, Artha, jobboardsoftware.com, jobBoardHQ, Nodex, eJobBoard,
+ejobsitesoftware.com.
 
-**Deferred to S13 (2, C3):** Built In (HTML + `JobPosting` JSON-LD), Otta / Welcome to
-the Jungle (HTML listing).
-
-**Excluded (9, documented):** LinkedIn, Indeed, Glassdoor, ZipRecruiter, Monster, Dice,
-SimplyHired, Wellfound, YC Work at a Startup — ToS prohibitions, paid/partner-only APIs,
-or session gating. `docs/platforms.md` shows the reason per row and the coverage math
+**No exclusions.** A board platform with no usable structured path is demoted to C3 (and
+stays owned by S13) or reported `outstanding` with a named reason. It is never removed
+from the inventory. `docs/platforms.md` shows the state per row and the coverage math
 both ways.
 
 ---
 
-### S13 — Wave F: HTML / headless residual (18)
+### S13 — Wave F: HTML / headless residual (26)
 **Deps:** S7, S8, S10, S11, S12 · **Parallel group:** B · **Model:** default
 
 **Context brief:** Only sources with no structured alternative justify a browser.
 Each one needs a written justification in `docs/platforms.md` and a fragility note.
 
-**In scope (18):** Avature, PageUp, Paycor, JazzHR, Jobvite, Trakstar Hire, JobScore,
-PCRecruiter, CATS, Freshteam, Manatal, ClearCompany, ApplicantPro, Hireology,
-TalentReef, Harri, Built In, Otta / Welcome to the Jungle — **plus** any C2 row demoted
-during S7/S8/S10/S11 probing.
+**In scope (26):** ApplicantPro, Avature, CareerPlug, Dover, Eightfold AI, FirstStage,
+Gem.com, GoHire, HireBridge, HireHive, Hireology, iSolvedHire, JazzHR, Jobvite,
+JOIN.com, Kula.ai, PageUp, Paradox, Paycor, Polymer, Recooty, Rival, talentReef,
+Trakstar, TriNet, WeRecruit — **plus** any C2 row demoted during S7/S8/S10/S11 probing.
 
 **Tasks:** Playwright-based connector base (browser pool, reuse, block-list of
 trackers, hard timeouts, screenshot on failure into the run record); convert each
@@ -467,8 +474,9 @@ measurement rather than a forecast.
   per platform status, live example, sample job, last success, connector path,
   tenants proven, open failures, and **forecast vs measured** against
   `docs/platforms.md` §3.
-- Regenerate the `Verified` column of `docs/platforms.md`; the working tree must be
-  clean after regeneration (proves the document is derived, not typed).
+- Regenerate the `Coverage` column of `docs/platforms.md` across the four states
+  (`implemented`, `tested`, `verified`, `outstanding`); the working tree must be clean
+  after regeneration (proves the document is derived, not typed).
 - NFR harness: 7-day success rate, p95 staleness per tier, search p95 at **500k** rows,
   full-refresh wall time, closure/failure audit query.
 - `docs/nfr.md` records actuals vs targets, with the query used for each number.
@@ -488,7 +496,8 @@ with a reason.
   tune tiers and dedup thresholds, rotate credentials.
 - `docs/cost-model.md`: arithmetic (requests/day, GB storage, headless minutes, DB,
   hosting) at 500k jobs / 6–24h refresh; what breaks if a dependency disappears.
-- `docs/limitations.md`: top 5 fragility risks + mitigations; excluded platforms.
+- `docs/limitations.md`: top 5 fragility risks + mitigations; every `outstanding`
+  platform with its named reason and revisit date.
 - `docs/adding-a-connector.md` final pass; template connector verified from scratch.
 - Final acceptance run against all 8 acceptance criteria, with command output pasted.
 
@@ -517,7 +526,7 @@ If a connector needs the strongest model, that is a signal the SDK is under-buil
 | Failed fetch closes jobs | S6 invariant suite, table-driven, blocking |
 | Live-internet tests make CI flaky | S1 `no_network` fixture; S2 capture/replay |
 | Schema churn after 20 connectors | Slice 1 validates shape before scale; `job`/`job_occurrence` split |
-| ToS / blocking exposure | Structured-first policy, robots gate, identifiable UA, documented exclusions |
+| ToS / blocking exposure | Structured-first policy, robots gate, identifiable UA, named `outstanding` rows — never exclusions |
 | 78 connectors ≠ 500k jobs | Tenant acquisition is its own problem (ADR 0005); the count is measured in S14, not assumed in the plan |
 | Handoff cost | SDK + template + runbook + generated coverage, not prose claims |
 | Scope creep into job-seeker features | Explicit out-of-scope list in README |
@@ -538,14 +547,17 @@ is a process defect.
 Approve §2 (wave sequencing) and the class assignments in `docs/platforms.md` before
 S1 begins. Three things are most worth challenging now:
 
-1. **Wave ordering** — enterprise suites (S10–S11) are 16 of 78 platforms but roughly
+1. **Wave ordering** — enterprise suites (S10–S11) are 15 of 78 platforms but roughly
    half the engineering risk. Doing boards first would show breadth sooner but delay
    the hardest transport problem. Boards also feed S9's evaluation set, so they are
    not purely a breadth play.
-2. **Platform inventory** — `docs/platforms.md` reconstructs the 78 from the named
-   families in the brief. If your real list differs, correct that table before S1;
-   it is the cheapest possible moment. Every row must keep exactly one `Wave`.
-3. **Tenant acquisition** — ADR 0005 states the uncomfortable arithmetic: 78 platforms
-   at one or two tenants each yields **~20k–50k** jobs, not 500k. Reaching the stated
-   scale requires a tenant-discovery effort with its own cost. Approve the target tenant
-   count (or lower the 500k figure) before S1, because it changes what "done" means.
+2. **Platform inventory** — `docs/platforms.md` is the brief's exact 58 + 20 names,
+   frozen in `docs/brief-platforms.txt` and classified by transport. Every row keeps
+   exactly one `Wave`, and no required platform may be excluded. Class or wave changes
+   after probing go through the demotion/promotion rules in `docs/platforms.md` §4.
+3. **Scale framing** — ADR 0005 separates three objectives: **A** all 78 platforms
+   (contractual), **B** 8,000–10,000 tenants (feasibility workstream), **C** 500k jobs
+   (non-contractual design benchmark). A outranks C. 78 platforms at one or two tenants
+   each yields **~20k–50k** jobs; reaching 500k requires the tenant-discovery workstream,
+   and the result is measured in S14, never assumed. Approve the framing before S1,
+   because it defines what "done" means.

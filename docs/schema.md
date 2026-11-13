@@ -26,7 +26,7 @@
 
 | Table | Answers |
 |---|---|
-| `platform` | *What platforms exist, which class, which wave, which are excluded?* |
+| `platform` | *What platforms exist, which class, which wave, which coverage state?* |
 | `source` | *Where do we look, how often, is it healthy, how was it discovered?* |
 | `job` | *What is the canonical opening?* (one row per ingested posting, pre-dedup) |
 | `job_cluster` | *Which jobs are the same real-world opening?* |
@@ -45,7 +45,10 @@
 CREATE TYPE transport_class AS ENUM
   ('api_json', 'embedded_json', 'html', 'headless', 'board_api');
 
-CREATE TYPE platform_class AS ENUM ('C1', 'C2', 'C3', 'C4', 'EX');
+CREATE TYPE platform_class AS ENUM ('C1', 'C2', 'C3', 'C4');
+
+CREATE TYPE coverage_state AS ENUM
+  ('implemented', 'tested', 'verified', 'outstanding');
 
 CREATE TYPE refresh_tier AS ENUM ('hot', 'warm', 'cool', 'dormant');
 
@@ -82,28 +85,31 @@ salary period to fill a column is a data-integrity defect.
 
 ## 3. `platform` (registry — seeded from `docs/platforms.md`)
 
-Without this table, class, wave and exclusion status live only in Markdown and the
+Without this table, class, wave and coverage state live only in Markdown and the
 coverage generator cannot be DB-backed (review finding M13).
 
 | Column | Type | Notes |
 |---|---|---|
-| `key` | `text pk` | `greenhouse`, `workday`, `linkedin` |
-| `display_name` | `text not null` | |
+| `key` | `text pk` | `greenhouse`, `workday`, `niceboard` |
+| `display_name` | `text not null` | brief-exact name, e.g. `Lever.co` |
 | `family` | `text not null` | `ats` / `board` |
-| `class` | `platform_class not null` | C1–C4, EX |
-| `wave` | `text` | `S3`,`S7`,`S8`,`S10`,`S11`,`S12`,`S13`,`EX` |
-| `transport` | `transport_class` | null for EX |
+| `class` | `platform_class not null` | C1–C4; **no EX** (ADR 0005 §A) |
+| `wave` | `text not null` | `S3`,`S7`,`S8`,`S10`,`S11`,`S12`,`S13` |
+| `transport` | `transport_class` | null only before a probe resolves it |
 | `auth_kind` | `text not null default 'none'` | `none` / `token` / `partner` |
-| `exclusion_reason` | `text` | required when `class = 'EX'` |
+| `coverage_state` | `coverage_state not null default 'outstanding'` | four states, ADR 0005 §A |
+| `coverage_reason` | `text` | required while `outstanding`; names the blocker and owner |
 | `notes` | `text` | robots/ToS position |
 
 ```sql
-ALTER TABLE platform ADD CONSTRAINT ex_requires_reason
-  CHECK (class <> 'EX' OR exclusion_reason IS NOT NULL);
+ALTER TABLE platform ADD CONSTRAINT outstanding_requires_reason
+  CHECK (coverage_state <> 'outstanding' OR coverage_reason IS NOT NULL);
 ```
 
-A migration seeds this from `docs/platforms.md`; a test asserts the table and the
-document agree row-for-row, so the two cannot drift.
+`verified` is never asserted by this table alone: the coverage generator promotes a row
+only when a `fetch_run` plus `job`/`job_occurrence` rows exist for a named tenant. A
+migration seeds this from `docs/platforms.md`; a test asserts the table and the document
+agree row-for-row, so the two cannot drift.
 
 ---
 
@@ -602,8 +608,8 @@ explicit markers or unambiguous phrases, and the inference is recorded in
 `fetch_run`, `change_event`, all enums, all constraints and indexes in §2–§11.
 
 **S2 adds:** no schema change. It adds `jobindex.cli coverage`, which reads these
-tables and regenerates the `Verified` column — `verified` is a derived fact from S2
-onward, never a hand edit.
+tables and regenerates the `Coverage` column across the four states — `verified` is a
+derived fact from S2 onward, never a hand edit.
 
 **S5 adds:** `source_run_queue` + queue indexes + reclaim.
 

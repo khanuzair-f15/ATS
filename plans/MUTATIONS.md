@@ -123,3 +123,74 @@ resolved without runtime evidence.
 `{S3: 1, S7: 10, S8: 15, S10: 8, S11: 8, S12: 9, S13: 18, EX: 9}`, no blank or multi-wave
 cell, no duplicate platform name, no row claiming `Verified` ≠ `no`; step `Deps` lines
 match plan §2; every `docs/schema.md` §-reference resolves to an existing section.
+
+> Those counts are **historical**. The authoritative inventory is brief-exact v1.0 and
+> is recorded in M-003 below; the M-002 text is preserved as history, not rewritten.
+
+---
+
+## M-003 — restore the brief's exact platform inventory (scope authority)
+
+- **Date:** 2026-11-13
+- **Trigger:** the project owner supplied the brief's authoritative list — **58 ATS +
+  20 board software platforms, by exact name**. The v0.2 inventory was a reconstruction:
+  it renamed platforms (`Cornerstone OnDemand` for `CSOD`, `UKG Pro` for `UltiPro`,
+  `Oracle Recruiting Cloud` for `Oracle Recruiting`, `ADP Workforce Now` for `ADP`), kept
+  platforms the brief does not name (Softgarden, Sympa, Newton, Gupy, Factorial, Kenoby,
+  SilkRoad, Talentsoft, eRecruiter, Bullhorn, PeopleSoft, JobScore, PCRecruiter, CATS,
+  ClearCompany, Harri, Built In, Otta), invented nine consumer board rows
+  (Remote OK, Remotive, …), and marked nine rows `EX`.
+- **Scope:** documents only. No dependency-graph change; the wave graph
+  `S3 → {S7, S10, S12} → {S8, S11} → S9 → S13 → S14` is unchanged.
+- **Authority:** `docs/brief-platforms.txt` is now the frozen manifest. `docs/platforms.md`
+  is checked against it row-for-row, both directions.
+
+### What changed
+
+| Area | Before (v0.2) | After (v1.0) |
+|---|---|---|
+| Platform names | reconstructed / renamed / substituted | the brief's exact 58 + 20, verbatim |
+| Board family | consumer boards (Remote OK, Remotive, …) | **job-board software platforms** (Niceboard, WP Job Manager, SmartJobBoard-class) |
+| Exclusions | 9 `EX` rows with reasons | **0 exclusions**; `outstanding` is the only alternative to `verified` (ADR 0005 §A) |
+| Class counts | C1 11, C2 31, C3 18, C4 9, EX 9 | **C1 11, C2 21, C3 26, C4 20** |
+| Wave counts | S3 1, S7 10, S8 15, S10 8, S11 8, S12 9, S13 18, EX 9 | **S3 1, S7 10, S8 6, S10 8, S11 7, S12 20, S13 26** |
+| Forecast | 64 of 78 with evidence or exclusion | **52 of 78 point, range 48–58, 0 excluded, 26 named outstanding** |
+| `platform_class` | `C1,C2,C3,C4,EX` | `C1,C2,C3,C4` |
+| Coverage | hand-edited `Verified = yes/no` | generated `coverage_state` across `implemented`, `tested`, `verified`, `outstanding` |
+| Transport changes | one-way C2→C3 demotion | demotion **and** C3→C2 promotion, each with probe evidence |
+
+### Files touched
+
+- `docs/brief-platforms.txt` — new; frozen verbatim manifest.
+- `docs/platforms.md` — v1.0; brief-exact 78 rows, wave ownership, forecast, demotion and
+  promotion rules, no exclusions section.
+- `docs/schema.md` — §1 wording, §2 `platform_class` without `EX` plus new
+  `coverage_state` enum, §3 `coverage_state`/`coverage_reason` and
+  `outstanding_requires_reason`; `exclusion_reason`/`ex_requires_reason` removed.
+- `plans/jobindex-blueprint.md` — S0 verification, S2 coverage wording, S7/S8/S10/S11/
+  S12/S13 platform lists, S14 `Coverage`, S15 outstanding platforms, §5 risk row, §7
+  inventory wording.
+- `docs/adr/0005-tenants-and-secrets.md` — current-state note now says v1.0 brief-exact.
+- `README.md` — platform/tenant/connector/job definitions, brief-exact 78, consumer
+  boards out of scope, A/B/C approval framing.
+- `scripts/verify_phase0.py` — new gate; asserts the inventory contract and schema refs.
+
+### Invariants
+
+None weakened. Two are strengthened:
+
+- Invariant 6 ("nothing claimed working without a live example and a `fetch_run` row")
+  now applies to a `coverage_state` machine rather than a boolean.
+- The no-exclusion rule means a hard platform cannot leave scope by being relabelled.
+
+### Verification of this mutation
+
+`python scripts/verify_phase0.py` must exit 0 and print:
+
+- manifest: `ATS = 58`, `BOARD = 20`, `total = 78`;
+- inventory: 78 data rows, exact-name match both directions, no duplicates;
+- no `EX` class, no missing or multi-valued `Wave`;
+- wave counts `{S3: 1, S7: 10, S8: 6, S10: 8, S11: 7, S12: 20, S13: 26}`, sum 78;
+- class counts `{C1: 11, C2: 21, C3: 26, C4: 20}`, sum 78;
+- every step `Deps` target exists; every `docs/schema.md §N` reference resolves;
+- every coverage state is one of the four allowed values.

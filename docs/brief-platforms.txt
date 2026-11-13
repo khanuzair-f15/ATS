@@ -1,0 +1,84 @@
+# Frozen platform manifest — verbatim from the original project brief.
+# Do not edit except to correct a transcription error, with a MUTATIONS.md entry.
+# Format: "<family>\t<exact platform name>"  (family: ATS | BOARD)
+# The inventory in docs/platforms.md is checked against this file, row for row.
+# Required totals: ATS = 58, BOARD = 20, total = 78.
+
+ATS	ADP
+ATS	ApplicantPro
+ATS	Ashby
+ATS	Avature
+ATS	BambooHR
+ATS	BrassRing
+ATS	Breezy HR
+ATS	CareerPlug
+ATS	Comeet
+ATS	CSOD
+ATS	Dayforce
+ATS	Deel
+ATS	Dover
+ATS	Eightfold AI
+ATS	FirstStage
+ATS	Freshteam
+ATS	Gem.com
+ATS	GoHire
+ATS	Greenhouse
+ATS	HiBob
+ATS	HireBridge
+ATS	HireHive
+ATS	Hireology
+ATS	HiringThing
+ATS	iCIMS
+ATS	iSolvedHire
+ATS	JazzHR
+ATS	Jobvite
+ATS	JOIN.com
+ATS	Kula.ai
+ATS	Lever.co
+ATS	Manatal
+ATS	Oracle Recruiting
+ATS	PageUp
+ATS	Paradox
+ATS	Paycom
+ATS	Paycor
+ATS	Paylocity
+ATS	Personio
+ATS	Phenom People
+ATS	Pinpoint
+ATS	Polymer
+ATS	Recooty
+ATS	Recruitee
+ATS	Rippling
+ATS	Rival
+ATS	SAP SuccessFactors
+ATS	SmartRecruiters
+ATS	talentReef
+ATS	Taleo
+ATS	Teamtailor
+ATS	Trakstar
+ATS	TriNet
+ATS	UltiPro
+ATS	WeRecruit
+ATS	Workable
+ATS	Workday
+ATS	Zoho Recruit
+BOARD	Niceboard
+BOARD	WP Job Manager
+BOARD	JobKit
+BOARD	Jobboardly
+BOARD	Jobiqo
+BOARD	JBoard.io
+BOARD	JobBoardFire
+BOARD	SmartJobBoard
+BOARD	JobBoard.io
+BOARD	Wiley Madgex
+BOARD	Talenetic
+BOARD	JobMount
+BOARD	CareerSiteCloud
+BOARD	JobBoard.com
+BOARD	Artha
+BOARD	jobboardsoftware.com
+BOARD	jobBoardHQ
+BOARD	Nodex
+BOARD	eJobBoard
+BOARD	ejobsitesoftware.com
