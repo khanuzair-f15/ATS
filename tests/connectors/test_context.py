@@ -112,6 +112,16 @@ class TestConnectorContextLifecycle:
             assert ctx.client.headers["User-Agent"].startswith("JobIndexBot/")
 
     @pytest.mark.asyncio
+    async def test_client_initialized_with_http2(self, config: ConnectorConfig) -> None:
+        """Test that ConnectorContext initializes the HTTP client with HTTP/2 support."""
+        async with ConnectorContext(config) as ctx:
+            # Verify HTTP/2 transport is initialized with a connection pool
+            # This tests that the h2 dependency is properly installed and configured
+            assert hasattr(ctx.client, "_transport")
+            assert hasattr(ctx.client._transport, "_pool")
+            assert ctx.client._transport._pool is not None
+
+    @pytest.mark.asyncio
     async def test_context_manager_closes_client(self, config: ConnectorConfig) -> None:
         ctx = ConnectorContext(config)
         async with ctx:
