@@ -191,7 +191,10 @@ jobs:
 
       - name: Verify database test counts
         run: |
-          python -m pytest tests/db/test_platform_seed.py tests/db/test_invariants.py --collect-only -q 2>&1 | grep -E "collected [0-9]+ items" | grep -q "collected 51 items" || (echo "FAIL: Expected 51 database tests" && exit 1)
+          echo "Collecting test count..."
+          COLLECT_OUTPUT=$(python -m pytest tests/db/test_platform_seed.py tests/db/test_invariants.py --collect-only -q 2>&1)
+          echo "$COLLECT_OUTPUT"
+          echo "$COLLECT_OUTPUT" | grep -q "51 tests collected" || (echo "FAIL: Expected 51 database tests, got: $(echo "$COLLECT_OUTPUT" | tail -1)" && exit 1)
           echo "Database test count verified: 51 tests collected"
 
       - name: Test migration downgrade
