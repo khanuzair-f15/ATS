@@ -18,9 +18,10 @@ import random
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -29,8 +30,6 @@ import tenacity
 from tenacity import (
     after_log,
     before_sleep_log,
-    retry,
-    retry_if_exception_type,
     stop_after_attempt,
     wait_exponential_jitter,
 )
@@ -165,9 +164,31 @@ class RateLimiter:
         self._lock = asyncio.Lock()
 
     def configure_host(self, host: str, config: RateLimitConfig) -> None:
-        """Configure rate limit for a specific host."""
-        # This is a simplified version; in practice you'd parse host from URL
-        pass
+        """Configure rate limit for a specific host.
+
+        Pre-creates a HostRateLimiter for the given host with the specified
+        configuration. Subsequent calls to acquire() for this host will use
+        the pre-configured limiter.
+        """
+
+        async def _set_limiter() -> None:
+            async with self._lock:
+                self._limiters[host] = HostRateLimiter(config)
+
+        # Run the async operation synchronously for simplicity
+        # In practice, this could be made async if needed
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're in an async context, schedule the task
+                task = loop.create_task(_set_limiter())
+                # Task is intentionally not awaited; it runs in background
+                _ = task
+            else:
+                loop.run_until_complete(_set_limiter())
+        except RuntimeError:
+            # No event loop, create one
+            asyncio.run(_set_limiter())
 
     def configure_source(
         self,
@@ -404,50 +425,100 @@ class LogContext:
 # Retry Policy
 # -----------------------------------------------------------------------------
 
+# Maximum delay cap for Retry-After header (seconds)
+MAX_RETRY_AFTER = 300  # 5 minutes
 
-def create_retry_policy(
-    max_attempts: int = DEFAULT_MAX_RETRIES,
+
+def parse_retry_after(value: str) -> float | None:
+    """Parse HTTP Retry-After header value.
+
+    Supports two formats per RFC 7231:
+    1. Integer seconds: "120"
+    2. HTTP-date: "Wed, 21 Oct 2015 07:28:00 GMT"
+
+    Args:
+        value: The Retry-After header value.
+
+    Returns:
+        Delay in seconds, or None if parsing fails.
+    """
+    value = value.strip()
+    if not value:
+        return None
+
+    # Try integer seconds first
+    try:
+        seconds = int(value)
+        return max(0.0, float(seconds))
+    except ValueError:
+        pass
+
+    # Try HTTP-date format
+    try:
+        from email.utils import parsedate_to_datetime
+        retry_date = parsedate_to_datetime(value)
+        if retry_date is not None:
+            now = datetime.now(UTC)
+            delay = (retry_date - now).total_seconds()
+            return max(0.0, delay)
+    except (ValueError, TypeError):
+        pass
+
+    return None
+
+
+def _get_retry_after_delay(exc: BaseException, max_delay: float = MAX_RETRY_AFTER) -> float | None:
+    """Extract Retry-After delay from an HTTPStatusError exception.
+
+    Args:
+        exc: The exception to check for Retry-After header.
+        max_delay: Maximum allowed delay in seconds.
+
+    Returns:
+        Delay in seconds if Retry-After is present and valid, None otherwise.
+    """
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return None
+
+    if exc.response is None:
+        return None
+
+    retry_after = exc.response.headers.get("Retry-After")
+    if not retry_after:
+        return None
+
+    delay = parse_retry_after(retry_after)
+    if delay is None:
+        return None
+
+    # Cap at maximum allowed delay
+    return min(delay, max_delay)
+
+
+def create_retry_wait_strategy(
     base_wait: float = 1.0,
     max_wait: float = 30.0,
     jitter: float = 0.5,
-) -> Callable[[Callable[..., Awaitable[Any]]], Callable[..., Awaitable[Any]]]:
-    """Create a tenacity retry policy for connector operations.
+) -> Callable[[tenacity.RetryCallState], float]:
+    """Create a wait strategy that respects Retry-After header for 429 responses.
 
-    Retries on:
-    - Transient network errors (timeout, connection error)
-    - HTTP 5xx errors
-    - HTTP 429 (rate limited) - respects Retry-After header
-
-    Does not retry on:
-    - HTTP 4xx errors (except 429)
-    - Parsing errors
+    For 429 responses with valid Retry-After header, uses the server-specified delay
+    (capped at max_wait). For other retryable errors, uses exponential backoff with jitter.
     """
-    def _is_retryable(exc: BaseException) -> bool:
-        error_class = classify_error(exc)
-        return is_retryable_error(error_class)
-
-    def _before_sleep(retry_state: tenacity.RetryCallState) -> None:
+    def wait_fn(retry_state: tenacity.RetryCallState) -> float:
         exc = retry_state.outcome.exception() if retry_state.outcome else None
-        if exc:
-            logger = logging.getLogger("jobindex.connectors.retry")
-            logger.warning(
-                "Retrying after error (attempt %d/%d): %s",
-                retry_state.attempt_number,
-                max_attempts,
-                type(exc).__name__,
-                extra={"error_class": classify_error(exc).value},
-            )
 
-    return retry(
-        reraise=True,
-        stop=stop_after_attempt(max_attempts),
-        wait=wait_exponential_jitter(initial=base_wait, max=max_wait, jitter=jitter),
-        retry=retry_if_exception_type(Exception),  # We filter in _is_retryable via custom callback
-        before_sleep=_before_sleep,
-        retry_error_callback=lambda retry_state: retry_state.outcome.exception()
-        if retry_state.outcome and retry_state.outcome.failed
-        else None,
-    )
+        # Check for Retry-After on 429
+        if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+            if exc.response.status_code == 429:
+                retry_after_delay = _get_retry_after_delay(exc)
+                if retry_after_delay is not None:
+                    return min(retry_after_delay, max_wait)
+
+        # Default: exponential backoff with jitter
+        return wait_exponential_jitter(initial=base_wait, max=max_wait, jitter=jitter)(retry_state)
+
+    return wait_fn
 
 
 # Custom retry condition that uses our classifier
@@ -462,13 +533,26 @@ def retry_if_transient_or_rate_limited(retry_state: tenacity.RetryCallState) -> 
 
 def create_connector_retry_policy(
     max_attempts: int = DEFAULT_MAX_RETRIES,
+    base_wait: float = 1.0,
+    max_wait: float = 30.0,
+    jitter: float = 0.5,
 ) -> tenacity.AsyncRetrying:
-    """Create a configured tenacity AsyncRetrying object for connector operations."""
+    """Create a configured tenacity AsyncRetrying object for connector operations.
+
+    Retries on:
+    - Transient network errors (timeout, connection error)
+    - HTTP 5xx errors
+    - HTTP 429 (rate limited) - respects Retry-After header
+
+    Does not retry on:
+    - HTTP 4xx errors (except 429)
+    - Parsing errors
+    """
     retry_logger = logging.getLogger("jobindex.connectors.retry")
     return tenacity.AsyncRetrying(
         reraise=True,
         stop=stop_after_attempt(max_attempts),
-        wait=wait_exponential_jitter(initial=1.0, max=30.0, jitter=0.5),
+        wait=create_retry_wait_strategy(base_wait, max_wait, jitter),
         retry=retry_if_transient_or_rate_limited,
         before_sleep=before_sleep_log(retry_logger, logging.WARNING),
         after=after_log(retry_logger, logging.INFO),
@@ -490,6 +574,10 @@ class ConnectorConfig:
     max_retries: int = DEFAULT_MAX_RETRIES
     timeout_s: float | None = None
     custom_headers: dict[str, str] = field(default_factory=dict)
+    # Retry policy configuration
+    retry_base_wait: float = 1.0
+    retry_max_wait: float = 30.0
+    retry_jitter: float = 0.5
 
 
 class ConnectorContext:
@@ -508,7 +596,12 @@ class ConnectorContext:
         self.config = config
         self._client: httpx.AsyncClient | None = None
         self._rate_limiter = RateLimiter()
-        self._retry_policy = create_connector_retry_policy(config.max_retries)
+        self._retry_policy = create_connector_retry_policy(
+            max_attempts=config.max_retries,
+            base_wait=config.retry_base_wait,
+            max_wait=config.retry_max_wait,
+            jitter=config.retry_jitter,
+        )
         self._log_context = LogContext(
             platform_key=config.platform_key,
             tenant_key=config.tenant.tenant_key,
@@ -696,6 +789,9 @@ async def create_connector_context(
     max_retries: int = DEFAULT_MAX_RETRIES,
     timeout_s: float | None = None,
     custom_headers: dict[str, str] | None = None,
+    retry_base_wait: float = 1.0,
+    retry_max_wait: float = 30.0,
+    retry_jitter: float = 0.5,
 ) -> ConnectorContext:
     """Factory function to create a ConnectorContext with source-derived settings."""
     config = ConnectorConfig(
@@ -710,5 +806,8 @@ async def create_connector_context(
         max_retries=max_retries,
         timeout_s=timeout_s,
         custom_headers=custom_headers or {},
+        retry_base_wait=retry_base_wait,
+        retry_max_wait=retry_max_wait,
+        retry_jitter=retry_jitter,
     )
     return ConnectorContext(config)
