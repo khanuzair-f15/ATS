@@ -270,12 +270,11 @@ headers = inject_secret_headers({}, secret)  # Adds Authorization: Bearer <secre
 ## Current Implementation Status
 
 - **S1 complete** — Protocol and base types defined
-- **S2 complete** — Shared HTTP client, retry, rate limiting, error classification, structured logging
+- **S2 complete** — Shared HTTP client, retry, rate limiting, error classification, structured logging, fixture capture/replay
 - **S3+** — Production connectors (Greenhouse first)
 
-## Future Requirements (S2 Phase 2+)
+## Future Requirements (S2 Phase 3+)
 
-- Fixture capture/replay tool (`tools/capture.py`, `tools/replay.py`)
 - HTML/JSON extraction utilities (`selectolax`, `lxml`, JSONPath)
 - Authentication abstraction (OAuth, token refresh, API keys)
 - Browser context pooling for Playwright
