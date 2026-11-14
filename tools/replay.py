@@ -196,10 +196,10 @@ class FixtureLoader:
                 request_path = case_dir / "request.json"
                 response_path = case_dir / "response.json"
 
-                if not all(p.exists() for p in (manifest_path, request_path, response_path)):
-                    continue
-
                 try:
+                    if not all(p.exists() for p in (manifest_path, request_path, response_path)):
+                        continue
+
                     manifest = json.loads(manifest_path.read_text())
                     request = json.loads(request_path.read_text())
                     response = json.loads(response_path.read_text())

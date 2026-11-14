@@ -179,7 +179,12 @@ class TestFixtureLoader:
             case_dir = platform_dir / "list_page_1"
             case_dir.mkdir(parents=True)
 
-            request = {"method": "GET", "url": "https://api.example.com", "headers": {}, "body": None}
+            request = {
+                "method": "GET",
+                "url": "https://api.example.com",
+                "headers": {},
+                "body": None,
+            }
             response = {"status_code": 200, "headers": {}, "body": {"jobs": []}}
             request_bytes = json.dumps(request, sort_keys=True).encode()
             response_bytes = json.dumps(response, sort_keys=True).encode()
@@ -211,7 +216,12 @@ class TestFixtureLoader:
             case_dir = platform_dir / "case1"
             case_dir.mkdir(parents=True)
 
-            request = {"method": "GET", "url": "https://api.example.com", "headers": {}, "body": None}
+            request = {
+                "method": "GET",
+                "url": "https://api.example.com",
+                "headers": {},
+                "body": None,
+            }
             response = {"status_code": 200, "headers": {}, "body": {}}
             request_bytes = json.dumps(request, sort_keys=True).encode()
             response_bytes = json.dumps(response, sort_keys=True).encode()
@@ -245,7 +255,12 @@ class TestFixtureLoader:
                 case_dir = platform_dir / case
                 case_dir.mkdir(parents=True)
 
-                request = {"method": "GET", "url": "https://api.example.com", "headers": {}, "body": None}
+                request = {
+                    "method": "GET",
+                    "url": "https://api.example.com",
+                    "headers": {},
+                    "body": None,
+                }
                 response = {"status_code": 200, "headers": {}, "body": {}}
                 request_bytes = json.dumps(request, sort_keys=True).encode()
                 response_bytes = json.dumps(response, sort_keys=True).encode()
@@ -267,11 +282,16 @@ class TestFixtureLoader:
                 (case_dir / "request.json").write_text(json.dumps(request))
                 (case_dir / "response.json").write_text(json.dumps(response))
 
+            # Now load all fixtures at once
             loader = FixtureLoader(fixtures_dir)
             fixtures = loader.list_fixtures()
             assert len(fixtures) == 2
-            assert any(f["platform_key"] == "greenhouse" and f["case_name"] == "list1" for f in fixtures)
-            assert any(f["platform_key"] == "lever" and f["case_name"] == "detail1" for f in fixtures)
+            assert any(
+                f["platform_key"] == "greenhouse" and f["case_name"] == "list1" for f in fixtures
+            )
+            assert any(
+                f["platform_key"] == "lever" and f["case_name"] == "detail1" for f in fixtures
+            )
 
 
 class TestReplayTransport:
@@ -284,8 +304,17 @@ class TestReplayTransport:
             case_dir = platform_dir / "case1"
             case_dir.mkdir(parents=True)
 
-            request = {"method": "GET", "url": "https://api.example.com/jobs", "headers": {}, "body": None}
-            response = {"status_code": 200, "headers": {"Content-Type": "application/json"}, "body": {"jobs": [{"id": "1"}]}}
+            request = {
+                "method": "GET",
+                "url": "https://api.example.com/jobs",
+                "headers": {},
+                "body": None,
+            }
+            response = {
+                "status_code": 200,
+                "headers": {"Content-Type": "application/json"},
+                "body": {"jobs": [{"id": "1"}]},
+            }
             request_bytes = json.dumps(request, sort_keys=True).encode()
             response_bytes = json.dumps(response, sort_keys=True).encode()
             request_hash = hashlib.sha256(request_bytes).hexdigest()
@@ -337,7 +366,11 @@ class TestReplayTransport:
             default_fixture = {
                 "response": {"status_code": 200, "headers": {}, "body": {"default": True}}
             }
-            transport = ReplayTransport(fixtures_dir=Path(tmpdir), strict=True, default_fixture=default_fixture)
+            transport = ReplayTransport(
+                fixtures_dir=Path(tmpdir),
+                strict=True,
+                default_fixture=default_fixture,
+            )
             request_obj = httpx.Request("GET", "https://api.example.com/unknown")
             response = transport.handle_request(request_obj)
 
@@ -374,14 +407,19 @@ class TestCaptureReplayRoundTrip:
             hashlib.sha256(request_bytes).hexdigest()
             hashlib.sha256(response_bytes).hexdigest()
 
+            request_bytes = json.dumps(request, sort_keys=True).encode()
+            response_bytes = json.dumps(response, sort_keys=True).encode()
+            request_hash = hashlib.sha256(request_bytes).hexdigest()
+            response_hash = hashlib.sha256(response_bytes).hexdigest()
+
             manifest = {
                 "format_version": "1.0",
                 "platform_key": "test_platform",
                 "case_name": "list_jobs",
                 "captured_at": "2024-01-01T00:00:00+00:00",
                 "user_agent": "TestBot",
-                "request_hash": hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest(),
-                "response_hash": hashlib.sha256(json.dumps(response, sort_keys=True).encode()).hexdigest(),
+                "request_hash": request_hash,
+                "response_hash": response_hash,
                 "redacted": True,
                 "original_url": "https://api.example.com/jobs?token=secret",
                 "method": "GET",
@@ -411,7 +449,9 @@ class TestCaptureReplayRoundTrip:
 
             # Test replay
             transport = ReplayTransport(fixtures_dir=fixtures_dir)
-            request_obj = httpx.Request("GET", "https://api.example.com/jobs?token=secret")
+            request_obj = httpx.Request(
+                "GET", "https://api.example.com/jobs?token=secret"
+            )
             response = transport.handle_request(request_obj)
 
             assert response.status_code == 200
@@ -429,7 +469,9 @@ class TestCaptureReplayRoundTrip:
                 "Content-Type": "application/json",
                 "Set-Cookie": "session=abc123",
             }
-            mock_response.aread = AsyncMock(return_value=json.dumps({"access_token": "secret", "data": "value"}).encode())
+            mock_response.aread = AsyncMock(
+                return_value=json.dumps({"access_token": "secret", "data": "value"}).encode()
+            )
 
             with patch("httpx.AsyncClient.request", return_value=mock_response):
                 await capture_request(
@@ -439,14 +481,19 @@ class TestCaptureReplayRoundTrip:
                     fixtures_dir=fixtures_dir,
                 )
 
-            request_data = json.loads((fixtures_dir / "test" / "auth" / "request.json").read_text())
-            response_data = json.loads((fixtures_dir / "test" / "auth" / "response.json").read_text())
+            request_data = json.loads(
+                (fixtures_dir / "test" / "auth" / "request.json").read_text()
+            )
+            response_data = json.loads(
+                (fixtures_dir / "test" / "auth" / "response.json").read_text()
+            )
 
             # Check header redaction
-            assert request_data["headers"].get("Authorization") is None or True  # Not set in this test
+            assert request_data["headers"].get("Authorization") is None or True  # Not set
+            # in this test
             # Response headers should have Set-Cookie redacted
-            # Note: The response headers come from the mock, so they won't be redacted in the fixture
-            # but the redaction is tested separately
+            # Note: The response headers come from the mock, so they won't be
+            # redacted in the fixture, but the redaction is tested separately
 
             # Check body redaction in response
             assert response_data["body"]["access_token"] == "***REDACTED***"
@@ -464,8 +511,17 @@ class TestCredentialScanning:
             case_dir = platform_dir / "case1"
             case_dir.mkdir(parents=True)
 
-            request = {"method": "GET", "url": "https://api.example.com", "headers": {}, "body": None}
-            response = {"status_code": 200, "headers": {}, "body": {"access_token": "***REDACTED***"}}
+            request = {
+                "method": "GET",
+                "url": "https://api.example.com",
+                "headers": {},
+                "body": None,
+            }
+            response = {
+                "status_code": 200,
+                "headers": {},
+                "body": {"access_token": "***REDACTED***"},
+            }
             request_bytes = json.dumps(request, sort_keys=True).encode()
             response_bytes = json.dumps(response, sort_keys=True).encode()
             request_hash = hashlib.sha256(request_bytes).hexdigest()
@@ -496,7 +552,12 @@ class TestCredentialScanning:
                 r"Authorization\s*[:=]\s*Bearer\s+[^\"\]\}\s]+",
             ]
 
-            for fixture_file in (case_dir / "request.json", case_dir / "response.json", case_dir / "manifest.json"):
+            fixture_files = (
+                case_dir / "request.json",
+                case_dir / "response.json",
+                case_dir / "manifest.json",
+            )
+            for fixture_file in fixture_files:
                 content = fixture_file.read_text()
                 for pattern in credential_patterns:
                     matches = re.findall(pattern, content, re.IGNORECASE)
@@ -516,7 +577,12 @@ class TestNoNetworkEnforcement:
             case_dir = platform_dir / "case1"
             case_dir.mkdir(parents=True)
 
-            request = {"method": "GET", "url": "https://api.example.com/test", "headers": {}, "body": None}
+            request = {
+                "method": "GET",
+                "url": "https://api.example.com/test",
+                "headers": {},
+                "body": None,
+            }
             response = {"status_code": 200, "headers": {}, "body": {"data": "test"}}
             request_bytes = json.dumps(request, sort_keys=True).encode()
             response_bytes = json.dumps(response, sort_keys=True).encode()
@@ -560,7 +626,12 @@ class TestCreateReplayContext:
             case_dir = platform_dir / "case1"
             case_dir.mkdir(parents=True)
 
-            request = {"method": "GET", "url": "https://api.example.com", "headers": {}, "body": None}
+            request = {
+                "method": "GET",
+                "url": "https://api.example.com",
+                "headers": {},
+                "body": None,
+            }
             response = {"status_code": 200, "headers": {}, "body": {}}
             request_bytes = json.dumps(request, sort_keys=True).encode()
             response_bytes = json.dumps(response, sort_keys=True).encode()
