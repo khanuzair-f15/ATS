@@ -84,13 +84,21 @@ async def db_engine(
 
 @pytest.fixture(scope="function")
 async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
-    """Create a new session for each test function, rollback on completion."""
+    """Create a session for normal tests using savepoint-based isolation.
     
-    async_session = async_sessionmaker(db_engine, expire_on_commit=False)
+    Uses join_transaction_mode="create_savepoint" to join an outer transaction.
+    The outer transaction is always rolled back, providing test isolation.
+    Session commits release the savepoint but do not commit the outer transaction.
+    """
+    async_session = async_sessionmaker(
+        db_engine,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
     
     async with db_engine.connect() as conn:
-        # Begin a transaction for this test
-        trans = await conn.begin()
+        # Begin outer transaction that will be rolled back
+        outer_trans = await conn.begin()
         try:
             session = async_session(bind=conn)
             try:
@@ -98,5 +106,28 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
             finally:
                 await session.close()
         finally:
-            # Rollback the transaction to isolate tests
-            await trans.rollback()
+            # Always rollback the outer transaction for isolation
+            await outer_trans.rollback()
+
+
+@pytest.fixture(scope="function")
+async def db_session_commit(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
+    """Create a session for tests requiring real transaction commit.
+    
+    Used by deferred-trigger tests (liveness, first_seen_at) where the test
+    must commit the actual transaction to fire deferred triggers.
+    The session manages its own transaction; fixture rolls back on cleanup.
+    """
+    async_session = async_sessionmaker(db_engine, expire_on_commit=False)
+    
+    async with db_engine.connect() as conn:
+        session = async_session(bind=conn)
+        try:
+            yield session
+        finally:
+            # Rollback if session has an active transaction (test commit succeeded
+            # and didn't raise). If test's commit raised IntegrityError, PostgreSQL
+            # already rolled back the transaction.
+            if session.in_transaction():
+                await session.rollback()
+            await session.close()

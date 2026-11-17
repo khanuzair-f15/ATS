@@ -20,8 +20,8 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete, select, text
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from jobindex.db import (
     ChangeEvent,
@@ -141,24 +141,27 @@ async def test_circular_fk_job_cluster_insertion(db_session, test_source) -> Non
     assert loaded_cluster.canonical_job_id == canonical_job.id
 
 
-async def test_canonical_consistency_enforced(db_session, test_source) -> None:
+async def test_canonical_consistency_enforced(db_session_commit, test_source) -> None:
     """Test that canonical_job_id must point to a job with is_canonical=true in same cluster."""
+    # Store source_id before any commit (session expires objects after commit)
+    source_id = test_source.id
+    
     # Create a cluster
     cluster = JobCluster(
         canonical_job_id=uuid4(),  # Non-existent job
         dedup_version="v1",
     )
-    db_session.add(cluster)
+    db_session_commit.add(cluster)
 
     # This should fail at commit due to deferred trigger
     with pytest.raises(IntegrityError):
-        await db_session.commit()
+        await db_session_commit.commit()
 
-    await db_session.rollback()
+    await db_session_commit.rollback()
 
     # Now create a valid canonical job first
     canonical_job = Job(
-        origin_source_id=test_source.id,
+        origin_source_id=source_id,
         origin_external_id="ext-456",
         title="Engineer",
         company="Acme",
@@ -167,12 +170,12 @@ async def test_canonical_consistency_enforced(db_session, test_source) -> None:
         content_hash=b"hash456",
         status=JobStatus.OPEN,
     )
-    db_session.add(canonical_job)
-    await db_session.flush()
+    db_session_commit.add(canonical_job)
+    await db_session_commit.flush()
 
     # Update cluster with valid canonical_job_id
     cluster.canonical_job_id = canonical_job.id
-    await db_session.commit()
+    await db_session_commit.commit()
 
 
 async def test_non_canonical_job_merged_into(db_session, test_source) -> None:
@@ -227,7 +230,7 @@ async def test_non_canonical_job_merged_into(db_session, test_source) -> None:
 # Liveness invariant tests
 # ============================================================================
 
-async def test_open_job_requires_live_occurrence(db_session, test_source) -> None:
+async def test_open_job_requires_live_occurrence(db_session_commit, test_source) -> None:
     """Test that an open job cannot exist with zero live occurrences."""
     job = Job(
         origin_source_id=test_source.id,
@@ -239,8 +242,8 @@ async def test_open_job_requires_live_occurrence(db_session, test_source) -> Non
         content_hash=b"hashlive",
         status=JobStatus.OPEN,
     )
-    db_session.add(job)
-    await db_session.flush()
+    db_session_commit.add(job)
+    await db_session_commit.flush()
 
     # Create a live occurrence
     occurrence = JobOccurrence(
@@ -253,24 +256,24 @@ async def test_open_job_requires_live_occurrence(db_session, test_source) -> Non
         last_seen_at=datetime.now(UTC),
         is_live=True,
     )
-    db_session.add(occurrence)
-    await db_session.commit()
+    db_session_commit.add(occurrence)
+    await db_session_commit.commit()
 
     # Now try to set is_live = false while job is still open
     occurrence.is_live = False
 
     # This should fail due to deferred trigger
     with pytest.raises(IntegrityError):
-        await db_session.commit()
+        await db_session_commit.commit()
 
-    await db_session.rollback()
+    await db_session_commit.rollback()
 
     # Correct path: reopen occurrence first, then change job status
     occurrence.is_live = True
-    await db_session.commit()
+    await db_session_commit.commit()
 
 
-async def test_job_status_change_requires_live_occurrence(db_session, test_source) -> None:
+async def test_job_status_change_requires_live_occurrence(db_session_commit, test_source) -> None:
     """Test that setting job.status='open' requires a live occurrence."""
     job = Job(
         origin_source_id=test_source.id,
@@ -282,17 +285,17 @@ async def test_job_status_change_requires_live_occurrence(db_session, test_sourc
         content_hash=b"hashlive2",
         status=JobStatus.UNVERIFIED,
     )
-    db_session.add(job)
-    await db_session.flush()
+    db_session_commit.add(job)
+    await db_session_commit.flush()
 
     # Try to set status to open without occurrence
     job.status = JobStatus.OPEN
 
     with pytest.raises(IntegrityError):
-        await db_session.commit()
+        await db_session_commit.commit()
 
 
-async def test_reopen_path(db_session, test_source) -> None:
+async def test_reopen_path(db_session_commit, test_source) -> None:
     """Test the correct reopen path: occurrence is_live=true first, then job status."""
     job = Job(
         origin_source_id=test_source.id,
@@ -306,8 +309,8 @@ async def test_reopen_path(db_session, test_source) -> None:
         closure_evidence_kind=ClosureEvidence.HTTP_404,
         closure_evidence_at=datetime.now(UTC),
     )
-    db_session.add(job)
-    await db_session.flush()
+    db_session_commit.add(job)
+    await db_session_commit.flush()
 
     occurrence = JobOccurrence(
         job_id=job.id,
@@ -319,18 +322,18 @@ async def test_reopen_path(db_session, test_source) -> None:
         last_seen_at=datetime.now(UTC),
         is_live=False,
     )
-    db_session.add(occurrence)
-    await db_session.commit()
+    db_session_commit.add(occurrence)
+    await db_session_commit.commit()
 
     # Reopen: first set occurrence is_live=true
     occurrence.is_live = True
-    await db_session.flush()
+    await db_session_commit.flush()
 
     # Then set job status to open
     job.status = JobStatus.OPEN
     job.closure_evidence_kind = None
     job.closure_evidence_at = None
-    await db_session.commit()
+    await db_session_commit.commit()
 
     # Verify
     assert job.status == JobStatus.OPEN
@@ -341,7 +344,7 @@ async def test_reopen_path(db_session, test_source) -> None:
 # first_seen_at immutability tests
 # ============================================================================
 
-async def test_first_seen_at_immutable(db_session, test_source) -> None:
+async def test_first_seen_at_immutable(db_session_commit, test_source) -> None:
     """Test that job.first_seen_at cannot be modified after insert."""
     job = Job(
         origin_source_id=test_source.id,
@@ -353,21 +356,22 @@ async def test_first_seen_at_immutable(db_session, test_source) -> None:
         content_hash=b"hashimmutable",
         status=JobStatus.OPEN,
     )
-    db_session.add(job)
-    await db_session.commit()
+    db_session_commit.add(job)
+    await db_session_commit.commit()
 
     original_first_seen = job.first_seen_at
 
     # Try to modify first_seen_at
     job.first_seen_at = datetime(2020, 1, 1, tzinfo=UTC)
 
-    with pytest.raises(IntegrityError):
-        await db_session.commit()
+    # Trigger raises generic exception (SQLSTATE P0001), not constraint violation
+    with pytest.raises(DBAPIError, match="immutable"):
+        await db_session_commit.commit()
 
-    await db_session.rollback()
+    await db_session_commit.rollback()
 
     # Verify it's unchanged
-    result = await db_session.execute(select(Job).where(Job.id == job.id))
+    result = await db_session_commit.execute(select(Job).where(Job.id == job.id))
     reloaded = result.scalar_one()
     assert reloaded.first_seen_at == original_first_seen
 
@@ -497,11 +501,11 @@ async def test_closure_candidate_view_logic(db_session, test_source) -> None:
 
     assert stale_job.id in candidates
 
-    # Cleanup
-    await db_session.execute(
-        text("DELETE FROM job_closure_candidates WHERE id = :id"),
-        {"id": stale_job.id},
-    )
+    # Cleanup: delete from underlying tables in FK order (view is not updatable)
+    await db_session.execute(delete(FetchRun).where(FetchRun.source_id == test_source.id))
+    await db_session.execute(delete(JobOccurrence).where(JobOccurrence.job_id == stale_job.id))
+    await db_session.execute(delete(Job).where(Job.id == stale_job.id))
+    await db_session.commit()
 
 
 async def test_closure_candidate_excludes_incomplete_listing(db_session, test_source) -> None:
@@ -1282,6 +1286,7 @@ async def test_partial_index_job_salary_floor(db_session, test_source) -> None:
         description_text="desc",
         content_hash=b"hashsalaryfloor",
         salary_min=Decimal("100000"),
+        salary_currency="USD",
     )
     db_session.add(job)
     await db_session.commit()
