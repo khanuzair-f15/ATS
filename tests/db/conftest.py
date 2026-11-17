@@ -41,6 +41,14 @@ async def db_engine(
     
     Only runs for tests marked with @pytest.mark.db.
     Fails hard if PostgreSQL is expected (CI) but unreachable.
+    
+    Pool size is 2 (not 1) because some tests require TWO concurrent connections:
+    - One for savepoint-based isolation (db_session via test_source fixture)
+    - One for real transaction commit to fire deferred triggers (db_session_commit)
+    
+    This is not a workaround for connection leaks; it is a legitimate requirement
+    for tests that need both savepoint isolation (for fixture setup) and genuine
+    transaction commit (to fire PostgreSQL deferred constraint triggers).
     """
     import asyncio
     import os
@@ -63,7 +71,7 @@ async def db_engine(
     engine = create_async_engine(
         settings.database_url,
         pool_pre_ping=False,
-        pool_size=1,
+        pool_size=2,  # See docstring: two concurrent connections needed per test
         max_overflow=0,
         connect_args={"timeout": 3, "command_timeout": 3},
     )
@@ -116,7 +124,8 @@ async def db_session_commit(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSessi
     
     Used by deferred-trigger tests (liveness, first_seen_at) where the test
     must commit the actual transaction to fire deferred triggers.
-    The session manages its own transaction; fixture rolls back on cleanup.
+    The session manages its own transaction; fixture rolls back on cleanup
+    if the test's commit failed (PostgreSQL auto-rolls back on error).
     """
     async_session = async_sessionmaker(db_engine, expire_on_commit=False)
     
@@ -124,10 +133,16 @@ async def db_session_commit(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSessi
         session = async_session(bind=conn)
         try:
             yield session
-        finally:
-            # Rollback if session has an active transaction (test commit succeeded
-            # and didn't raise). If test's commit raised IntegrityError, PostgreSQL
-            # already rolled back the transaction.
+        except Exception:
+            # If test raised an exception (e.g., IntegrityError), PostgreSQL
+            # has already rolled back the transaction. We still need to close
+            # the session to return the connection to the pool.
+            await session.close()
+            raise
+        else:
+            # Test completed without exception. If session has an active transaction
+            # (test didn't commit), roll it back. If test committed, the transaction
+            # is already committed and we just close the session.
             if session.in_transaction():
                 await session.rollback()
             await session.close()
