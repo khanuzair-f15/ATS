@@ -189,13 +189,20 @@ jobs:
         run: |
           python -m pytest tests/db/test_invariants.py -v --tb=short
 
+      - name: Run Phase 4 coverage integration tests
+        env:
+          JOBINDEX_DATABASE_URL: postgresql+asyncpg://jobindex:jobindex@localhost:5432/jobindex
+          JOBINDEX_USER_AGENT: JobIndexBot/0.1 (+https://example.invalid/jobindex; contact=ops@example.invalid)
+        run: |
+          python -m pytest tests/db/test_coverage_sync.py -v --tb=short
+
       - name: Verify database test counts
         run: |
           echo "Collecting test count..."
-          COLLECT_OUTPUT=$(python -m pytest tests/db/test_platform_seed.py tests/db/test_invariants.py --collect-only -q 2>&1)
+          COLLECT_OUTPUT=$(python -m pytest tests/db/test_platform_seed.py tests/db/test_invariants.py tests/db/test_coverage_sync.py --collect-only -q 2>&1)
           echo "$COLLECT_OUTPUT"
-          echo "$COLLECT_OUTPUT" | grep -q "51 tests collected" || (echo "FAIL: Expected 51 database tests, got: $(echo "$COLLECT_OUTPUT" | tail -1)" && exit 1)
-          echo "Database test count verified: 51 tests collected"
+          echo "$COLLECT_OUTPUT" | grep -q "67 tests collected" || (echo "FAIL: Expected 67 database tests, got: $(echo "$COLLECT_OUTPUT" | tail -1)" && exit 1)
+          echo "Database test count verified: 67 tests collected"
 
       - name: Test migration downgrade
         env:

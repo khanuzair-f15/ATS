@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING
 
 import pytest
 from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
 
-from jobindex.settings import get_settings
+if TYPE_CHECKING:
+    from jobindex.settings import get_settings
+else:
+    from jobindex.settings import get_settings
 
 
 @pytest.fixture(scope="session")
@@ -28,12 +34,16 @@ def postgres_available() -> bool:
 
 
 @pytest.fixture(scope="function")
-async def db_engine(request: pytest.FixtureRequest, postgres_available: bool):
-    """Create a new async engine for each test function, skipping if DB unavailable.
+async def db_engine(
+    request: pytest.FixtureRequest, postgres_available: bool
+) -> AsyncGenerator[AsyncEngine, None]:
+    """Create a new async engine for each test function.
     
     Only runs for tests marked with @pytest.mark.db.
+    Fails hard if PostgreSQL is expected (CI) but unreachable.
     """
     import asyncio
+    import os
     
     # Only run for tests marked with @pytest.mark.db
     if not request.node.get_closest_marker("db"):
@@ -41,7 +51,12 @@ async def db_engine(request: pytest.FixtureRequest, postgres_available: bool):
         return
     
     if not postgres_available:
-        pytest.skip("PostgreSQL not running on localhost:5432")
+        # PostgreSQL is not available (port closed or unreachable).
+        # In CI this is a configuration error; locally we skip.
+        if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
+            pytest.fail("PostgreSQL is not available on localhost:5432 (expected in CI).")
+        else:
+            pytest.skip("PostgreSQL not running on localhost:5432")
         return
     
     settings = get_settings()
@@ -54,27 +69,21 @@ async def db_engine(request: pytest.FixtureRequest, postgres_available: bool):
     )
     # Verify database is reachable before yielding
     try:
-        async with asyncio.wait_for(engine.connect(), timeout=5) as conn:
-            from sqlalchemy import text
-            await conn.execute(text("SELECT 1"))
+        async with asyncio.timeout(5):
+            async with engine.connect() as conn:
+                from sqlalchemy import text
+                await conn.execute(text("SELECT 1"))
     except Exception as e:
-        pytest.skip(f"Database not reachable: {e}")
+        pytest.fail(f"Database not reachable after port check: {e}")
         return
     try:
         yield engine
     finally:
-        # Clean up
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        loop.run_until_complete(engine.dispose())
+        await engine.dispose()
 
 
 @pytest.fixture(scope="function")
-async def db_session(db_engine) -> AsyncGenerator:
+async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
     """Create a new session for each test function, rollback on completion."""
     
     async_session = async_sessionmaker(db_engine, expire_on_commit=False)
