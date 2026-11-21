@@ -12,6 +12,7 @@ ORM ``source``/``platform`` models for fixtures.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from json import dumps
 from uuid import uuid4
 
 import pytest
@@ -88,7 +89,7 @@ async def _insert_pending_task(
         {
             "source_id": str(source_id),
             "run_id": str(run_id or uuid4()),
-            "payload": {},
+            "payload": dumps({}),
         },
     )
     row = result.mappings().first()

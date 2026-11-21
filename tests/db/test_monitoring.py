@@ -49,6 +49,7 @@ async def _make_source(
         tenant_status="validated",
         health=health,
         enabled=enabled,
+        last_attempt_at=datetime.now(UTC),
     )
     session.add(source)
     await session.flush()

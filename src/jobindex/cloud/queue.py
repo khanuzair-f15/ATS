@@ -11,6 +11,7 @@ transitions, which keeps this module easy to test with a mocked session.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from sqlalchemy import text
@@ -231,6 +232,13 @@ INSERT_PENDING_TASK_SQL = text(
     """
 )
 
+LOG_EVENT_SQL = text(
+    """
+    INSERT INTO serverless_execution_log (task_id, run_id, worker_id, event, detail)
+    VALUES (:task_id, :run_id, :worker_id, :event, :detail)
+    """
+)
+
 
 # ---------------------------------------------------------------------------
 # Thin async wrappers
@@ -356,7 +364,11 @@ async def mark_task_succeeded(
     """
     await session.execute(
         MARK_TASK_SUCCEEDED_SQL,
-        {"task_id": task_id, "claim_token": claim_token, "result": result},
+        {
+            "task_id": task_id,
+            "claim_token": claim_token,
+            "result": json.dumps(result or {}),
+        },
     )
 
 
@@ -440,7 +452,7 @@ async def log_event(
             "run_id": run_id,
             "worker_id": worker_id,
             "event": event,
-            "detail": detail or {},
+            "detail": json.dumps(detail or {}),
         },
     )
 
@@ -454,7 +466,11 @@ async def insert_pending_task(
     """Insert one pending task (used by the dispatcher / tests)."""
     result = await session.execute(
         INSERT_PENDING_TASK_SQL,
-        {"source_id": source_id, "run_id": run_id, "payload": payload},
+        {
+            "source_id": source_id,
+            "run_id": run_id,
+            "payload": json.dumps(payload),
+        },
     )
     row = result.mappings().first()
     if row is None:  # pragma: no cover - INSERT ... RETURNING always yields a row
