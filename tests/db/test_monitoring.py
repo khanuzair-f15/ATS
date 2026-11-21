@@ -226,9 +226,9 @@ async def test_last_attempt_and_next_due_reported(db_session) -> None:
     row = rows[0]
     assert row["last_attempt_at"] is not None
     assert row["next_due_at"] is not None
-    # Parsable timestamps.
-    assert row["last_attempt_at"].endswith("Z")
-    assert row["next_due_at"].endswith("Z")
+    # Parsable timestamps (ISO 8601 with Z suffix).
+    assert str(row["last_attempt_at"]).endswith("Z")
+    assert str(row["next_due_at"]).endswith("Z")
 
 
 async def test_source_summary_shape(db_session) -> None:

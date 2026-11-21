@@ -131,13 +131,14 @@ async def test_stale_worker_completion_is_fenced(db_session) -> None:
 
     # Simulate worker-b re-claiming the same task after worker-a's lease expired:
     # the claim_token rotates to token_b while the task is still 'running'.
+    claim_token_b = str(uuid4())
     await db_session.execute(
         text(
             "UPDATE serverless_task_queue "
             "SET claim_token = :new_token, heartbeat_at = now() "
             "WHERE id = :id AND state = 'running'"
         ),
-        {"new_token": "claim-token-b", "id": task_id},
+        {"new_token": claim_token_b, "id": task_id},
     )
     await db_session.flush()
 
@@ -145,7 +146,7 @@ async def test_stale_worker_completion_is_fenced(db_session) -> None:
     await mark_task_succeeded(
         db_session,
         task_id=int(task["id"]),
-        claim_token="claim-token-b",
+        claim_token=claim_token_b,
         result={"jobs_found": 1},
     )
 
