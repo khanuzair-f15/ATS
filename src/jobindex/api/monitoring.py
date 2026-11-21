@@ -105,7 +105,7 @@ async def _fetch_source_rows(
             s.rate_limit_rps,
             p.display_name AS platform_display_name,
             p.family,
-            p.platform_class,
+            p."class" AS platform_class,
             (
                 SELECT EXISTS (
                     SELECT 1
