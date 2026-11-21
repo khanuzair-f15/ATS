@@ -217,19 +217,21 @@ async def test_zero_jobs_cannot_verify(db_session, coverage_platform) -> None:
     assert entry.get("verified", False) is False
 
 
-async def test_occurrence_seen_before_the_run_cannot_verify(
+async def test_exact_run_link_controls_attribution_independently_of_timestamp(
     db_session, coverage_platform
 ) -> None:
     source = await make_source(db_session)
     run = await make_run(db_session, source)
-    # Occurrence linked to the run but with last_seen_at before the run started
-    # should not verify because the occurrence cannot have been recorded by this run
-    await make_live_job(
-        db_session, source, fetch_run_id=run.id, last_seen_at=RUN_START - timedelta(minutes=5)
-    )
+    await make_live_job(db_session, source, external_id="unlinked", last_seen_at=OCCURRENCE_SEEN)
+    assert (await evidence_for(db_session)).get("verified", False) is False
 
+    job = await make_live_job(
+        db_session, source, external_id="linked", fetch_run_id=run.id,
+        last_seen_at=RUN_START - timedelta(minutes=5),
+    )
     entry = await evidence_for(db_session)
-    assert entry.get("verified", False) is False
+    assert entry["verified"] is True
+    assert entry["sample_job_id"] == str(job.id)
 
 
 async def test_dead_occurrence_cannot_verify(db_session, coverage_platform) -> None:
@@ -320,12 +322,10 @@ async def test_cleanup_is_explicit_for_this_platform(db_session, coverage_platfo
     await db_session.flush()
 
 
-async def test_occurrence_updated_after_run_finishes_cannot_verify_earlier_run(
+async def test_later_timestamp_preserves_explicit_run_link(
     db_session, coverage_platform
 ) -> None:
-    """An occurrence with fetch_run_id pointing to a run but last_seen_at after
-    the run finished cannot verify that earlier run. This test ensures the
-    association is strictly by fetch_run_id, not by timestamp."""
+    """The persisted run ID determines attribution after a later timestamp update."""
     source = await make_source(db_session)
     run = await make_run(db_session, source)
     # Create an occurrence linked to the run but with last_seen_at AFTER the run finished
@@ -385,6 +385,24 @@ async def test_occurrence_from_another_source_cannot_verify_run(
     assert entry.get("verified", False) is False
 
 
+async def test_foreign_occurrence_cannot_increase_verified_tenant_count(
+    db_session, coverage_platform
+) -> None:
+    source_a = await make_source(db_session, tenant_key="tenant-a")
+    source_b = await make_source(db_session, tenant_key="tenant-b")
+    run_a = await make_run(db_session, source_a)
+    run_b = await make_run(db_session, source_b)
+    await make_live_job(db_session, source_b, external_id="wrong-run", fetch_run_id=run_a.id)
+    own_job = await make_live_job(
+        db_session, source_b, external_id="own-run", fetch_run_id=run_b.id
+    )
+
+    entry = await evidence_for(db_session)
+    assert entry["verified_tenants"] == 1
+    assert entry["sample_job_id"] == str(own_job.id)
+    assert "tenant-b" in entry["verified_reason"]
+
+
 async def test_sequential_runs_cannot_borrow_occurrence_evidence(
     db_session, coverage_platform
 ) -> None:
@@ -397,14 +415,11 @@ async def test_sequential_runs_cannot_borrow_occurrence_evidence(
     await make_live_job(db_session, source, external_id="job-1", fetch_run_id=run1.id)
 
     # Second run: successful, complete, but NO occurrences linked to it
-    run2 = await make_run(
-        db_session, source, outcome=FetchOutcome.SUCCESS, jobs_found=0, listing_complete=True
-    )
+    run2 = await make_run(db_session, source)
 
     entry = await evidence_for(db_session)
     # run1 has an occurrence, run2 does not
     # The platform should verify (because run1 verified it)
-    # But run2's occurrence count is 0, which is correctly reflected in jobs_found=0
     assert entry["verified"] is True
     assert entry["verified_tenants"] == 1
 
@@ -412,6 +427,9 @@ async def test_sequential_runs_cannot_borrow_occurrence_evidence(
     # This should still verify because run2 has an occurrence
     await db_session.execute(delete(JobOccurrence).where(JobOccurrence.fetch_run_id == run1.id))
     await db_session.flush()
+
+    entry = await evidence_for(db_session)
+    assert entry.get("verified", False) is False
 
     job2 = await make_live_job(db_session, source, external_id="job-2", fetch_run_id=run2.id)
     await db_session.flush()

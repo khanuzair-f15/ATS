@@ -328,12 +328,14 @@ CREATE TRIGGER job_first_seen_guard BEFORE UPDATE ON job
 | `last_verified_at` | `timestamptz` | last successful detail fetch |
 | `last_verification_status` | `verification_status` | enum, not free text |
 | `is_live` | `boolean not null default true` | guarded by deferred trigger (§8) |
+| `fetch_run_id` | `uuid references fetch_run(id)` | **the fetch run that recorded this occurrence**; null for legacy rows |
 
 ```sql
 UNIQUE (source_id, external_id);
 CREATE INDEX occurrence_job_live ON job_occurrence (job_id) WHERE is_live;
 CREATE INDEX occurrence_source_stale ON job_occurrence (source_id, is_live, last_seen_at);
 CREATE INDEX occurrence_next_check ON job_occurrence (source_id, last_seen_at);
+CREATE INDEX occurrence_fetch_run ON job_occurrence (fetch_run_id) WHERE fetch_run_id IS NOT NULL;
 ```
 
 `UNIQUE (source_id, external_id)` is the pipeline's idempotency key.
@@ -342,6 +344,14 @@ CREATE INDEX occurrence_next_check ON job_occurrence (source_id, last_seen_at);
 `is_live = (last_seen_at >= started_at of the most recent listing_complete fetch_run
 for this source)`. A detail 404 sets `last_verification_status = 'not_found'` but does
 **not** by itself set `is_live = false`.
+
+**Coverage verification evidence**: A platform is `verified` only when at least one
+live `job_occurrence` has a non-null `fetch_run_id` pointing to a `fetch_run` with
+`outcome = 'success'`, `listing_complete = true`, `jobs_found > 0`, and
+`finished_at IS NOT NULL`. The occurrence and run must have the same `source_id`.
+The stored run ID identifies the recording run. A legacy row with a null link
+cannot verify a run. Coverage uses the stored liveness flag and imposes no
+additional time window on `last_seen_at`.
 
 ---
 

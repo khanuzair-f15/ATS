@@ -323,7 +323,13 @@ class Job(Base):
 
 
 class JobOccurrence(Base):
-    """Where a posting was seen. Never deleted, never merged (`docs/schema.md` §6)."""
+    """Where a posting was seen. Never deleted, never merged (`docs/schema.md` §6).
+
+    The `fetch_run_id` links an occurrence to the specific fetch run that recorded it.
+    This enables exact verification evidence: a VERIFIED coverage state requires at
+    least one live occurrence whose `fetch_run_id` points to a successful, complete
+    fetch run for the same source.
+    """
 
     __tablename__ = "job_occurrence"
 
@@ -333,6 +339,11 @@ class JobOccurrence(Base):
     )
     source_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("source.id", ondelete="RESTRICT"), nullable=False
+    )
+    # The fetch run that recorded this occurrence. Nullable for historical rows
+    # created before this column existed; new occurrences MUST have it set.
+    fetch_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("fetch_run.id", ondelete="SET NULL")
     )
     external_id: Mapped[str] = mapped_column(Text, nullable=False)
     source_url: Mapped[str] = mapped_column(Text, nullable=False)
@@ -357,12 +368,18 @@ class JobOccurrence(Base):
     is_live: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
 
     job: Mapped[Job] = relationship(back_populates="occurrences")
+    fetch_run: Mapped[FetchRun | None] = relationship()
 
     __table_args__ = (
         UniqueConstraint("source_id", "external_id", name="occurrence_identity"),
         Index("occurrence_job_live", "job_id", postgresql_where=text("is_live")),
         Index("occurrence_source_stale", "source_id", "is_live", "last_seen_at"),
         Index("occurrence_next_check", "source_id", "last_seen_at"),
+        Index(
+            "occurrence_fetch_run",
+            "fetch_run_id",
+            postgresql_where=text("fetch_run_id IS NOT NULL"),
+        ),
     )
 
 

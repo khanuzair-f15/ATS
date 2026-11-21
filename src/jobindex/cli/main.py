@@ -10,6 +10,7 @@ import argparse
 import sys
 from collections import Counter
 
+from jobindex.cli.coverage import build_coverage_parser
 from jobindex.platforms import PLATFORMS
 
 
@@ -29,6 +30,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     platforms = sub.add_parser("platforms", help="list the platform inventory")
     platforms.set_defaults(func=_cmd_platforms)
+
+    # Add coverage subcommand
+    build_coverage_parser(sub)
+
     return parser
 
 

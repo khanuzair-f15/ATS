@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -13,22 +15,33 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-if TYPE_CHECKING:
-    from jobindex.settings import get_settings
-else:
-    from jobindex.settings import get_settings
+from jobindex.db import (
+    Job,
+    JobCluster,
+    JobOccurrence,
+    Platform,
+    Source,
+)
+from jobindex.db.enums import (
+    CoverageState,
+    PlatformClass,
+    TenantStatus,
+    TransportClass,
+)
+from jobindex.settings import get_settings
 
 
 @pytest.fixture(scope="session")
 def postgres_available() -> bool:
-    """Check if PostgreSQL is available on localhost:5432 (session-scoped, runs once)."""
+    """Check if PostgreSQL is available at the configured endpoint (session-scoped, runs once)."""
     import socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(0.5)
+
+    from sqlalchemy.engine import make_url
+
+    url = make_url(get_settings().database_url)
     try:
-        sock.connect(("localhost", 5432))
-        sock.close()
-        return True
+        with socket.create_connection((url.host or "localhost", url.port or 5432), timeout=0.5):
+            return True
     except (TimeoutError, ConnectionRefusedError, OSError):
         return False
 
@@ -42,13 +55,7 @@ async def db_engine(
     Only runs for tests marked with @pytest.mark.db.
     Fails hard if PostgreSQL is expected (CI) but unreachable.
     
-    Pool size is 2 (not 1) because some tests require TWO concurrent connections:
-    - One for savepoint-based isolation (db_session via test_source fixture)
-    - One for real transaction commit to fire deferred triggers (db_session_commit)
-    
-    This is not a workaround for connection leaks; it is a legitimate requirement
-    for tests that need both savepoint isolation (for fixture setup) and genuine
-    transaction commit (to fire PostgreSQL deferred constraint triggers).
+    Real-commit teardown may use a second connection for independent cleanup.
     """
     import asyncio
     import os
@@ -62,9 +69,9 @@ async def db_engine(
         # PostgreSQL is not available (port closed or unreachable).
         # In CI this is a configuration error; locally we skip.
         if os.environ.get("CI") or os.environ.get("GITHUB_ACTIONS"):
-            pytest.fail("PostgreSQL is not available on localhost:5432 (expected in CI).")
+            pytest.fail("PostgreSQL is not available at the configured endpoint (expected in CI).")
         else:
-            pytest.skip("PostgreSQL not running on localhost:5432")
+            pytest.skip("PostgreSQL not running at the configured endpoint")
         return
     
     settings = get_settings()
@@ -120,29 +127,96 @@ async def db_session(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, Non
 
 @pytest.fixture(scope="function")
 async def db_session_commit(db_engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
-    """Create a session for tests requiring real transaction commit.
-    
-    Used by deferred-trigger tests (liveness, first_seen_at) where the test
-    must commit the actual transaction to fire deferred triggers.
-    The session manages its own transaction; fixture rolls back on cleanup
-    if the test's commit failed (PostgreSQL auto-rolls back on error).
-    """
-    async_session = async_sessionmaker(db_engine, expire_on_commit=False)
-    
-    async with db_engine.connect() as conn:
-        session = async_session(bind=conn)
-        try:
-            yield session
-        except Exception:
-            # If test raised an exception (e.g., IntegrityError), PostgreSQL
-            # has already rolled back the transaction. We still need to close
-            # the session to return the connection to the pool.
-            await session.close()
-            raise
-        else:
-            # Test completed without exception. If session has an active transaction
-            # (test didn't commit), roll it back. If test committed, the transaction
-            # is already committed and we just close the session.
-            if session.in_transaction():
-                await session.rollback()
-            await session.close()
+    """Use a real database transaction so deferred triggers run at commit."""
+    sessions = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with sessions() as session:
+        yield session
+
+
+@dataclass(frozen=True)
+class CommittedRecords:
+    """The primary keys reserved for one real-commit test."""
+
+    source_id: UUID = field(default_factory=uuid4)
+    job_id: UUID = field(default_factory=uuid4)
+    cluster_id: UUID = field(default_factory=uuid4)
+    occurrence_id: UUID = field(default_factory=uuid4)
+
+
+@pytest.fixture
+async def committed_records(
+    db_session_commit: AsyncSession,
+    db_engine: AsyncEngine,
+) -> AsyncGenerator[CommittedRecords, None]:
+    records = CommittedRecords()
+    platform_key = f"commit_test_{records.source_id.hex}"
+    platform = Platform(
+        key=platform_key,
+        display_name="Commit Test Platform",
+        family="ats",
+        platform_class=PlatformClass.C1,
+        wave="S3",
+        transport=TransportClass.API_JSON,
+        auth_kind="none",
+        coverage_state=CoverageState.OUTSTANDING,
+        coverage_reason="test",
+        notes="test",
+    )
+    source = Source(
+        id=records.source_id,
+        platform_key=platform_key,
+        tenant_key="commit_test_tenant",
+        display_name="Commit Test Tenant",
+        entry_url="https://commit.example.com/careers",
+        transport_class=TransportClass.API_JSON,
+        connector=platform_key,
+        tenant_status=TenantStatus.VALIDATED,
+    )
+    db_session_commit.add(platform)
+    await db_session_commit.flush()
+    db_session_commit.add(source)
+    await db_session_commit.flush()
+    try:
+        await db_session_commit.commit()
+        yield records
+    finally:
+        await db_session_commit.rollback()
+        async with db_engine.begin() as conn:
+            # Lock both FK targets before checking for incoming SET NULL links.
+            # Other incoming links use RESTRICT or NO ACTION and fail atomically.
+            job = (Job.id == records.job_id) & (Job.origin_source_id == records.source_id)
+            cluster = (JobCluster.id == records.cluster_id) & (
+                JobCluster.canonical_job_id == records.job_id
+            )
+            await conn.execute(select(Job.id).where(job).with_for_update())
+            await conn.execute(select(JobCluster.id).where(cluster).with_for_update())
+            shared = await conn.scalar(
+                select(Job.id)
+                .where(
+                    Job.id != records.job_id,
+                    or_(
+                        Job.cluster_id == records.cluster_id,
+                        Job.merged_into_job_id == records.job_id,
+                    ),
+                )
+                .limit(1)
+            )
+            if shared is not None:
+                raise RuntimeError(f"Unrelated job {shared} references fixture records")
+
+            await conn.execute(
+                delete(JobOccurrence).where(
+                    JobOccurrence.id == records.occurrence_id,
+                    JobOccurrence.source_id == records.source_id,
+                    JobOccurrence.job_id == records.job_id,
+                )
+            )
+            await conn.execute(delete(JobCluster).where(cluster))
+            await conn.execute(delete(Job).where(job))
+            await conn.execute(
+                delete(Source).where(
+                    Source.id == records.source_id,
+                    Source.platform_key == platform_key,
+                )
+            )
+            await conn.execute(delete(Platform).where(Platform.key == platform_key))

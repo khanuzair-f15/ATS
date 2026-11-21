@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import uuid4
 
 import pytest
 from sqlalchemy import delete, select, text
@@ -141,40 +140,39 @@ async def test_circular_fk_job_cluster_insertion(db_session, test_source) -> Non
     assert loaded_cluster.canonical_job_id == canonical_job.id
 
 
-async def test_canonical_consistency_enforced(db_session_commit, test_source) -> None:
+async def test_canonical_consistency_enforced(db_session_commit, committed_records) -> None:
     """Test that canonical_job_id must point to a job with is_canonical=true in same cluster."""
-    # Store source_id before any commit (session expires objects after commit)
-    source_id = test_source.id
-    
-    # Create a cluster
-    cluster = JobCluster(
-        canonical_job_id=uuid4(),  # Non-existent job
-        dedup_version="v1",
-    )
-    db_session_commit.add(cluster)
-
-    # This should fail at commit due to deferred trigger
-    with pytest.raises(IntegrityError):
-        await db_session_commit.commit()
-
-    await db_session_commit.rollback()
-
-    # Now create a valid canonical job first
-    canonical_job = Job(
-        origin_source_id=source_id,
+    job = Job(
+        id=committed_records.job_id,
+        origin_source_id=committed_records.source_id,
         origin_external_id="ext-456",
         title="Engineer",
         company="Acme",
         company_normalized="acme",
         description_text="desc",
         content_hash=b"hash456",
-        status=JobStatus.OPEN,
+        status=JobStatus.UNVERIFIED,
     )
-    db_session_commit.add(canonical_job)
-    await db_session_commit.flush()
+    db_session_commit.add(job)
+    await db_session_commit.commit()
 
-    # Update cluster with valid canonical_job_id
-    cluster.canonical_job_id = canonical_job.id
+    def new_cluster():
+        return JobCluster(
+            id=committed_records.cluster_id, canonical_job_id=job.id, dedup_version="v1"
+        )
+
+    db_session_commit.add(new_cluster())
+    await db_session_commit.flush()
+    with pytest.raises(DBAPIError, match="has no canonical job"):
+        await db_session_commit.commit()
+    await db_session_commit.rollback()
+    await db_session_commit.refresh(job)
+
+    cluster = new_cluster()
+    db_session_commit.add(cluster)
+    await db_session_commit.flush()
+    job.cluster_id = cluster.id
+    job.is_canonical = True
     await db_session_commit.commit()
 
 
@@ -230,10 +228,11 @@ async def test_non_canonical_job_merged_into(db_session, test_source) -> None:
 # Liveness invariant tests
 # ============================================================================
 
-async def test_open_job_requires_live_occurrence(db_session_commit, test_source) -> None:
+async def test_open_job_requires_live_occurrence(db_session_commit, committed_records) -> None:
     """Test that an open job cannot exist with zero live occurrences."""
     job = Job(
-        origin_source_id=test_source.id,
+        id=committed_records.job_id,
+        origin_source_id=committed_records.source_id,
         origin_external_id="ext-live-1",
         title="Live Job",
         company="Test Co",
@@ -247,8 +246,9 @@ async def test_open_job_requires_live_occurrence(db_session_commit, test_source)
 
     # Create a live occurrence
     occurrence = JobOccurrence(
+        id=committed_records.occurrence_id,
         job_id=job.id,
-        source_id=test_source.id,
+        source_id=committed_records.source_id,
         external_id="occ-1",
         source_url="https://test.example.com/jobs/1",
         apply_urls=["https://test.example.com/apply/1"],
@@ -263,20 +263,23 @@ async def test_open_job_requires_live_occurrence(db_session_commit, test_source)
     occurrence.is_live = False
 
     # This should fail due to deferred trigger
-    with pytest.raises(IntegrityError):
+    with pytest.raises(DBAPIError, match="is open with zero live occurrences"):
         await db_session_commit.commit()
 
     await db_session_commit.rollback()
 
     # Correct path: reopen occurrence first, then change job status
-    occurrence.is_live = True
-    await db_session_commit.commit()
+    await db_session_commit.refresh(occurrence)
+    assert occurrence.is_live is True
 
 
-async def test_job_status_change_requires_live_occurrence(db_session_commit, test_source) -> None:
+async def test_job_status_change_requires_live_occurrence(
+    db_session_commit, committed_records
+) -> None:
     """Test that setting job.status='open' requires a live occurrence."""
     job = Job(
-        origin_source_id=test_source.id,
+        id=committed_records.job_id,
+        origin_source_id=committed_records.source_id,
         origin_external_id="ext-live-2",
         title="Another Job",
         company="Test Co",
@@ -291,14 +294,15 @@ async def test_job_status_change_requires_live_occurrence(db_session_commit, tes
     # Try to set status to open without occurrence
     job.status = JobStatus.OPEN
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(DBAPIError, match="is open with zero live occurrences"):
         await db_session_commit.commit()
 
 
-async def test_reopen_path(db_session_commit, test_source) -> None:
+async def test_reopen_path(db_session_commit, committed_records) -> None:
     """Test the correct reopen path: occurrence is_live=true first, then job status."""
     job = Job(
-        origin_source_id=test_source.id,
+        id=committed_records.job_id,
+        origin_source_id=committed_records.source_id,
         origin_external_id="ext-reopen",
         title="Reopen Job",
         company="Test Co",
@@ -313,8 +317,9 @@ async def test_reopen_path(db_session_commit, test_source) -> None:
     await db_session_commit.flush()
 
     occurrence = JobOccurrence(
+        id=committed_records.occurrence_id,
         job_id=job.id,
-        source_id=test_source.id,
+        source_id=committed_records.source_id,
         external_id="occ-reopen",
         source_url="https://test.example.com/jobs/reopen",
         apply_urls=["https://test.example.com/apply/reopen"],
@@ -344,17 +349,18 @@ async def test_reopen_path(db_session_commit, test_source) -> None:
 # first_seen_at immutability tests
 # ============================================================================
 
-async def test_first_seen_at_immutable(db_session_commit, test_source) -> None:
+async def test_first_seen_at_immutable(db_session_commit, committed_records) -> None:
     """Test that job.first_seen_at cannot be modified after insert."""
     job = Job(
-        origin_source_id=test_source.id,
+        id=committed_records.job_id,
+        origin_source_id=committed_records.source_id,
         origin_external_id="ext-immutable",
         title="Immutable Test",
         company="Test Co",
         company_normalized="test co",
         description_text="desc",
         content_hash=b"hashimmutable",
-        status=JobStatus.OPEN,
+        status=JobStatus.UNVERIFIED,
     )
     db_session_commit.add(job)
     await db_session_commit.commit()
@@ -371,7 +377,7 @@ async def test_first_seen_at_immutable(db_session_commit, test_source) -> None:
     await db_session_commit.rollback()
 
     # Verify it's unchanged
-    result = await db_session_commit.execute(select(Job).where(Job.id == job.id))
+    result = await db_session_commit.execute(select(Job).where(Job.id == committed_records.job_id))
     reloaded = result.scalar_one()
     assert reloaded.first_seen_at == original_first_seen
 
@@ -399,7 +405,8 @@ async def test_closed_requires_evidence(db_session, test_source) -> None:
 
     await db_session.rollback()
 
-    # With evidence - should work
+    # Rollback removed the pending insert from the session.
+    db_session.add(job)
     job.status = JobStatus.CLOSED
     job.closure_evidence_kind = ClosureEvidence.HTTP_404
     job.closure_evidence_at = datetime.now(UTC)
@@ -1202,9 +1209,16 @@ async def test_partial_index_job_one_canonical_per_cluster(db_session, test_sour
         description_text="desc",
         content_hash=b"hashcanon1",
         status=JobStatus.OPEN,
-        cluster_id=uuid4(),
+        cluster_id=None,
         is_canonical=True,
     )
+    db_session.add(job1)
+    await db_session.flush()
+    cluster = JobCluster(canonical_job_id=job1.id, dedup_version="v1")
+    db_session.add(cluster)
+    await db_session.flush()
+    job1.cluster_id = cluster.id
+    await db_session.flush()
     job2 = Job(
         origin_source_id=test_source.id,
         origin_external_id="ext-canon-2",
@@ -1217,10 +1231,9 @@ async def test_partial_index_job_one_canonical_per_cluster(db_session, test_sour
         cluster_id=job1.cluster_id,  # Same cluster
         is_canonical=True,
     )
-    db_session.add(job1)
     db_session.add(job2)
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(IntegrityError, match="job_one_canonical_per_cluster"):
         await db_session.commit()
 
 
