@@ -15,7 +15,7 @@ env:
 jobs:
   s1-verification:
     name: S1 PostgreSQL Verification
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     services:
@@ -43,10 +43,20 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      - name: Install PostgreSQL client tools
+      - name: Verify PostgreSQL 16 client and server
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client-16
+          bin=/usr/lib/postgresql/16/bin
+          if [[ ! -x "$bin/psql" || ! -x "$bin/pg_isready" ]]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client-16
+          fi
+          for tool in psql pg_isready; do
+            "$bin/$tool" --version | grep -E ' \(PostgreSQL\) 16\.'
+          done
+          echo "$bin" >> "$GITHUB_PATH"
+          server_version=$("$bin/psql" -XAt -h localhost -U jobindex -d jobindex -c 'SHOW server_version_num')
+          echo "PostgreSQL server_version_num=$server_version"
+          test "$((server_version / 10000))" -eq 16
 
       - name: Set up Python
         uses: actions/setup-python@v5
