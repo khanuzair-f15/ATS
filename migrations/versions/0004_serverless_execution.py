@@ -58,12 +58,12 @@ TASK_QUEUE_DDL: list[str] = [
       result             jsonb,
       created_at         timestamptz NOT NULL DEFAULT now(),
       completed_at       timestamptz,
-      CONSTRAINT serverless_task_one_live_per_source
-        UNIQUE (source_id) WHERE state IN ('pending', 'running'),
       CONSTRAINT serverless_task_source_run
         UNIQUE (source_id, run_id)
     )
     """,
+    "CREATE UNIQUE INDEX serverless_task_one_live_per_source "
+    "ON serverless_task_queue (source_id) WHERE state IN ('pending', 'running')",
     "CREATE INDEX serverless_task_pending "
     "ON serverless_task_queue (next_claim_at) WHERE state = 'pending'",
     "CREATE INDEX serverless_task_source_state "
@@ -150,10 +150,11 @@ DOWNGRADE: list[str] = [
     "DROP INDEX IF EXISTS serverless_execution_log_event",
     "DROP INDEX IF EXISTS serverless_execution_log_run",
     "DROP INDEX IF EXISTS serverless_execution_log_task",
-    "DROP TABLE IF EXISTS serverless_execution_log",
+    "DROP INDEX IF EXISTS serverless_task_one_live_per_source",
     "DROP INDEX IF EXISTS serverless_task_run",
     "DROP INDEX IF EXISTS serverless_task_source_state",
     "DROP INDEX IF EXISTS serverless_task_pending",
+    "DROP TABLE IF EXISTS serverless_execution_log",
     "DROP TABLE IF EXISTS serverless_task_queue",
     "DROP TYPE IF EXISTS serverless_task_state",
     "ALTER TABLE source DROP COLUMN IF EXISTS claimed_task_token",
