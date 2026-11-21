@@ -17,6 +17,7 @@ from fastapi import Depends, FastAPI, Response, status
 from fastapi.responses import JSONResponse
 
 from jobindex import __version__
+from jobindex.api.monitoring import router as monitoring_router
 from jobindex.db.session import check_database
 from jobindex.settings import get_settings
 
@@ -38,6 +39,8 @@ def create_app() -> FastAPI:
         version=__version__,
         description="Deduplicated, current, auditable job index.",
     )
+
+    app.include_router(monitoring_router)
 
     @app.get("/healthz", tags=["ops"])
     async def healthz() -> dict[str, str]:

@@ -20,6 +20,9 @@ dependencies = [
   "pydantic-settings>=2.7",
   "httpx[http2]>=0.28",
   "tenacity>=9.0",
+  "selectolax>=0.3",
+  "lxml>=5.0",
+  "jsonpath-ng>=1.6",
 ]
 
 [project.optional-dependencies]
@@ -60,9 +63,15 @@ ignore = ["S101"]  # asserts are the test suite
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106"]
+"src/jobindex/connectors/_template/**" = ["E501", "I001", "UP037", "F821", "F811", "F401", "UP035", "RUF012"]
+"src/jobindex/connectors/__init__.py" = ["RUF022"]
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
 files = ["src"]
+exclude = ["src/jobindex/connectors/_template"]
+
+[tool.vercel]
+entrypoint = "jobindex.api.app:app"

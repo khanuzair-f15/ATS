@@ -2,6 +2,8 @@
 
 S1 exposes only what exists: inventory inspection. The coverage generator (`coverage`),
 which regenerates `docs/platforms.md`'s `Coverage` column from the database, ships in S2.
+The `cloud` subcommand (Phase 5A prototype) exposes the offline cloud-execution
+verification command.
 """
 
 from __future__ import annotations
@@ -25,6 +27,14 @@ def _cmd_platforms(_: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_cloud_verify(ns: argparse.Namespace) -> int:
+    from jobindex.cloud.verification import run_verification
+
+    _ = ns
+    all_ok, _results = run_verification(json_output=False)
+    return 0 if all_ok else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jobindex")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -33,6 +43,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Add coverage subcommand
     build_coverage_parser(sub)
+
+    # Phase 5A cloud verification command
+    cloud = sub.add_parser("cloud", help="Phase 5A cloud-execution verification")
+    cloud_sub = cloud.add_subparsers(dest="cloud_command", required=True)
+    verify = cloud_sub.add_parser("verify", help="verify the cloud execution prototype offline")
+    verify.add_argument(
+        "--json",
+        action="store_true",
+        help="emit machine-readable JSON instead of summary text",
+    )
+    verify.set_defaults(func=_cmd_cloud_verify)
 
     return parser
 

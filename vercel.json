@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "framework": null,
+  "env": {
+    "JOBINDEX_DATABASE_URL": "@jobindex-database-url",
+    "WORKER_ID": "@worker-id",
+    "JOBINDEX_CRON_SECRET": "@jobindex-cron-secret"
+  }
+}

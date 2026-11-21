@@ -149,14 +149,18 @@ jobs:
 
       - name: Verify index inventory matches migration
         run: |
-          # Expected from migration 0001_baseline.py:
-          # Partial indexes (9): source_due, job_one_canonical_per_cluster, job_open_liveness,
+          # Expected from migrations 0001_baseline.py + 0004_serverless_execution.py:
+          # 0001 partial indexes (9): source_due, job_one_canonical_per_cluster, job_open_liveness,
           #   job_sort, job_remote_type, job_salary_floor, occurrence_job_live,
           #   fetch_run_failures, fetch_run_complete_listing
-          # Full indexes (9): job_search_tsv_gin, job_company_trgm, job_location_trgm,
+          # 0004 partial indexes (2): serverless_task_pending, serverless_task_one_live_per_source
+          #   (unique constraint index), plus partial unique serverless_task_source_run
+          # 0001 full indexes (9): job_search_tsv_gin, job_company_trgm, job_location_trgm,
           #   job_status_sort, occurrence_source_stale, occurrence_next_check,
           #   fetch_run_source_time, change_event_job_time, change_event_run
-          # Total: 18 indexes (9 partial + 9 full)
+          # 0004 full indexes (5): serverless_task_source_state, serverless_task_run,
+          #   serverless_execution_log_task, serverless_execution_log_run,
+          #   serverless_execution_log_event
           
           psql -h localhost -p 5432 -U jobindex -d jobindex -c "
             -- Verify partial indexes
@@ -193,7 +197,9 @@ jobs:
           set -euo pipefail
           test "$(psql -XAtc "SELECT current_setting('server_version_num')::int / 10000")" = 16
           snapshot() {
-            for table in platform source job job_cluster job_occurrence fetch_run change_event; do
+            # Seven original Phase 4 tables plus the two Phase 5A tables:
+            # serverless_task_queue and serverless_execution_log (migration 0004).
+            for table in platform source job job_cluster job_occurrence fetch_run change_event serverless_task_queue serverless_execution_log; do
               echo "$table"
               psql -XAt -v ON_ERROR_STOP=1 -c "SELECT to_jsonb(t) FROM $table t ORDER BY to_jsonb(t)"
             done
@@ -205,7 +211,7 @@ jobs:
           import sys
           import xml.etree.ElementTree as ET
           cases = ET.parse(sys.argv[1]).findall(".//testcase")
-          assert len(cases) == 68, f"Expected 68 DB cases, got {len(cases)}"
+          assert len(cases) == 85, f"Expected 85 DB cases, got {len(cases)}"
           assert all(c.find("skipped") is None for c in cases), "Database tests skipped"
           PY
             snapshot > "$RUNNER_TEMP/db-after"
@@ -243,6 +249,9 @@ jobs:
             SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name;
             SELECT COUNT(*) FROM platform;
           "
+          # The approved Phase 4 inventory has exactly 78 platforms (58 ATS + 20 board).
+          platform_count=$(psql -XAt -h localhost -U jobindex -d jobindex -c "SELECT COUNT(*) FROM platform")
+          test "$platform_count" = 78
 
       - name: Test API readiness with DB available
         env:

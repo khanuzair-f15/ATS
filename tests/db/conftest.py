@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, or_, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -141,6 +141,39 @@ class CommittedRecords:
     job_id: UUID = field(default_factory=uuid4)
     cluster_id: UUID = field(default_factory=uuid4)
     occurrence_id: UUID = field(default_factory=uuid4)
+
+
+async def _ensure_platform(
+    session: AsyncSession,
+    *,
+    platform_key: str,
+    display_name: str | None = None,
+) -> None:
+    """Insert a platform row idempotently so multiple sources can share one platform.
+
+    ``platform.key`` is the primary key, so a test that creates several sources on the
+    same platform must not re-insert the platform row. ``ON CONFLICT DO NOTHING`` makes
+    this safe to call repeatedly within one test transaction.
+    """
+    await session.execute(
+        text(
+            """
+            INSERT INTO platform (
+                key, display_name, family, class, wave, transport,
+                auth_kind, coverage_state, coverage_reason, notes
+            )
+            VALUES (
+                :key, :display_name, 'ats', 'C1', 'S3', 'api_json',
+                'none', 'outstanding', 'test', 'test'
+            )
+            ON CONFLICT (key) DO NOTHING
+            """
+        ),
+        {
+            "key": platform_key,
+            "display_name": display_name or f"{platform_key} Display",
+        },
+    )
 
 
 @pytest.fixture
